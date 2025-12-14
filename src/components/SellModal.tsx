@@ -22,6 +22,7 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
   const [percentage, setPercentage] = useState(100);
   const [price, setPrice] = useState('0.5');
   const [loading, setLoading] = useState(false);
+  const [approvalStep, setApprovalStep] = useState<string>('');
 
   const sharesToSell = (totalShares * percentage) / 100;
   const totalReceive = sharesToSell * parseFloat(price);
@@ -44,9 +45,46 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
     }
 
     setLoading(true);
+    setApprovalStep('');
 
     try {
-      // Get JWT token for authentication
+      const market = position.market;
+
+      // Step 1: Handle approvals for selling shares
+      if (orderBuilder.contracts) {
+        // Determine the correct exchange based on market type
+        const exchangeKey = market.isNegRisk
+          ? (market.isYieldBearing ? 'YIELD_BEARING_NEG_RISK_CTF_EXCHANGE' : 'NEG_RISK_CTF_EXCHANGE')
+          : (market.isYieldBearing ? 'YIELD_BEARING_CTF_EXCHANGE' : 'CTF_EXCHANGE');
+
+        const conditionalTokensKey = market.isYieldBearing ? 'YIELD_BEARING_CONDITIONAL_TOKENS' : 'CONDITIONAL_TOKENS';
+
+        console.log('🔧 Using exchange:', exchangeKey, 'conditionalTokens:', conditionalTokensKey);
+
+        const exchangeAddress = (orderBuilder.contracts as any)[exchangeKey].contract.target;
+        const conditionalTokensContract = (orderBuilder.contracts as any)[conditionalTokensKey].contract;
+
+        // Check if Conditional Tokens are approved for the exchange
+        const isApprovedERC1155 = await conditionalTokensContract.isApprovedForAll(address, exchangeAddress);
+        if (!isApprovedERC1155) {
+          setApprovalStep('Approving your shares for trading...');
+          console.log('Approving ConditionalTokens for', exchangeKey);
+          showToast('Please approve your shares for trading', 'info');
+          const approveTx = await conditionalTokensContract.setApprovalForAll(exchangeAddress, true);
+          console.log('ConditionalTokens approval tx:', approveTx.hash);
+          setApprovalStep('Confirming approval...');
+          await approveTx.wait();
+          console.log('✅ ConditionalTokens approved');
+          showToast('Shares approved successfully!', 'success');
+        } else {
+          console.log('✅ ConditionalTokens already approved');
+        }
+      }
+
+      // Step 2: Get JWT token for authentication
+      setApprovalStep('Authenticating...');
+      // Step 2: Get JWT token for authentication
+      setApprovalStep('Authenticating...');
       try {
         const authMessageResponse = await predictAPI.getAuthMessage(address);
         const message = authMessageResponse.data?.message || authMessageResponse.message;
@@ -65,7 +103,8 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
         // Continue anyway - some endpoints might work without JWT
       }
 
-      const market = position.market;
+      // Step 3: Build and submit sell order
+      setApprovalStep('Creating sell order...');
       const positionOutcome = position.outcome;
 
       // Find outcome
@@ -149,7 +188,7 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-content" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <h2>Sell Position</h2>
+          <h2>Sell {position.outcome?.name} Shares</h2>
           <button className="close-btn" onClick={onClose}>×</button>
         </div>
 
@@ -160,11 +199,11 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
               <span className="info-value">{position.market?.question}</span>
             </div>
             <div className="info-row">
-              <span>Outcome:</span>
+              <span>Your Position:</span>
               <span className="info-value outcome-badge">{position.outcome?.name}</span>
             </div>
             <div className="info-row">
-              <span>Total Shares:</span>
+              <span>Available Shares:</span>
               <span className="info-value">{totalShares.toFixed(2)}</span>
             </div>
           </div>
@@ -203,16 +242,20 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
 
           <div className="order-summary">
             <div className="summary-row">
-              <span>You're selling:</span>
+              <span>Selling:</span>
               <span className="summary-value">{sharesToSell.toFixed(2)} shares</span>
             </div>
             <div className="summary-row">
-              <span>Price per share:</span>
-              <span className="summary-value">${parseFloat(price).toFixed(2)}</span>
+              <span>At price:</span>
+              <span className="summary-value">${parseFloat(price).toFixed(2)} per share</span>
+            </div>
+            <div className="summary-row">
+              <span>Market Fee:</span>
+              <span className="summary-value">{((position.market?.feeRateBps || 0) / 100).toFixed(2)}%</span>
             </div>
             <div className="summary-row total">
-              <span>You'll receive:</span>
-              <span className="summary-value">${totalReceive.toFixed(2)}</span>
+              <span>Total Cost:</span>
+              <span className="summary-value">${totalReceive.toFixed(2)} USDT</span>
             </div>
           </div>
         </div>
@@ -226,7 +269,7 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
             onClick={handleSell}
             disabled={loading || sharesToSell === 0}
           >
-            {loading ? 'Creating Order...' : 'Create Sell Order'}
+            {loading ? (approvalStep || 'Creating Order...') : `Sell ${sharesToSell.toFixed(0)} shares`}
           </button>
         </div>
       </div>
