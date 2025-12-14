@@ -76,8 +76,7 @@ Edit `.env` and add your credentials:
 # Get from https://cloud.walletconnect.com
 VITE_WALLETCONNECT_PROJECT_ID=your_project_id_here
 
-# Predict.fun API configuration
-VITE_API_URL=https://api.predict.fun
+# Predict.fun API key (get from Discord)
 VITE_API_KEY=your_api_key_here
 ```
 
@@ -170,8 +169,9 @@ src/
 3. Add environment variables:
    - `VITE_WALLETCONNECT_PROJECT_ID`
    - `VITE_API_KEY`
-   - `VITE_API_URL`
 4. Deploy!
+
+**Note:** The app uses Vercel rewrites (`/api/*` → `https://api.predict.fun/*`) to avoid CORS issues. No need to set API_URL.
 
 ### Environment Variables for Production
 
@@ -179,7 +179,6 @@ Make sure to set these in your Vercel project settings:
 
 ```env
 VITE_WALLETCONNECT_PROJECT_ID=your_project_id
-VITE_API_URL=https://api.predict.fun
 VITE_API_KEY=your_api_key
 ```
 

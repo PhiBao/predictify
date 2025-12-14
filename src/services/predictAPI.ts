@@ -1,7 +1,5 @@
-// In development, use proxy to avoid CORS. In production, use direct API URL
-const API_BASE_URL = import.meta.env.DEV 
-  ? '/api'  // Proxy through Vite dev server
-  : (import.meta.env.VITE_API_URL || 'https://api.predict.fun');
+// Always use /api proxy for both dev and production to avoid CORS
+const API_BASE_URL = '/api';
 const API_KEY = import.meta.env.VITE_API_KEY;
 
 export class PredictAPI {

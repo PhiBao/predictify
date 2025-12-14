@@ -21,9 +21,10 @@
    In Vercel project settings → Environment Variables:
    ```
    VITE_WALLETCONNECT_PROJECT_ID=your_project_id
-   VITE_API_URL=https://api.predict.fun
    VITE_API_KEY=your_api_key
    ```
+   
+   **Note:** Do NOT set `VITE_API_URL` - the app uses Vercel rewrites to proxy API requests and avoid CORS issues.
 
 4. **Deploy:**
    - Click "Deploy"
@@ -57,8 +58,9 @@ Required for deployment:
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `VITE_WALLETCONNECT_PROJECT_ID` | WalletConnect Project ID | Get from [cloud.walletconnect.com](https://cloud.walletconnect.com) |
-| `VITE_API_URL` | Predict.fun API URL | `https://api.predict.fun` |
 | `VITE_API_KEY` | Predict.fun API Key | Get from Discord |
+
+**Important:** The app uses `/api` proxy rewrites configured in `vercel.json` to avoid CORS issues. Do not set `VITE_API_URL`.
 
 ## Post-Deployment
 
