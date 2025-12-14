@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useAccount, useWalletClient } from 'wagmi';
 import { predictAPI } from '../services/predictAPI';
-import { useToast } from '../contexts/ToastContext';
 import { formatEther } from 'ethers';
 import { SellModal } from './SellModal';
 import type { Position } from '../types/predict';
@@ -9,7 +8,6 @@ import type { Position } from '../types/predict';
 export function UserPositions() {
   const { address } = useAccount();
   const { data: walletClient } = useWalletClient();
-  const { showToast } = useToast();
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(false);
   const [sellModalPosition, setSellModalPosition] = useState<any>(null);
@@ -119,8 +117,6 @@ export function UserPositions() {
           
           // Calculate average price paid per share
           const avgPrice = sharesNum > 0 ? (valueNum / sharesNum) : 0;
-          
-          const positionId = position.id;
           
           return (
             <div key={index} className="position-card">

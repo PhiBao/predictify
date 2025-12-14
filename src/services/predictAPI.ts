@@ -42,10 +42,8 @@ export class PredictAPI {
 
     if (!response.ok) {
       const errorText = await response.text();
-      let errorDetail = errorText;
       try {
         const errorJson = JSON.parse(errorText);
-        errorDetail = JSON.stringify(errorJson, null, 2);
         console.error('API Error Details:', errorJson);
       } catch {
         console.error('API Error (non-JSON):', errorText);

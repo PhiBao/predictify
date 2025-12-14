@@ -18,7 +18,7 @@ export function MarketsList() {
         console.log('First market isNegRisk:', data.data?.[0]?.isNegRisk);
         
         // Log all unique status values (including null)
-        const statuses = [...new Set(data.data?.map(m => m.status === null ? 'null (OPEN)' : m.status) || [])];
+        const statuses = [...new Set(data.data?.map((m: any) => m.status === null ? 'null (OPEN)' : m.status) || [])];
         console.log('Market statuses found:', statuses);
         
         setMarkets(data.data || []);

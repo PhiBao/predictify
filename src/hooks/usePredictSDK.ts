@@ -23,7 +23,7 @@ export function usePredictSDK() {
         const signer = await provider.getSigner();
 
         // Initialize OrderBuilder with BNB mainnet
-        const builder = await OrderBuilder.make(ChainId.BnbMainnet, signer);
+        const builder = await OrderBuilder.make(ChainId.BnbMainnet, signer as any);
         
         setOrderBuilder(builder);
         setIsReady(true);
