@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://api.predict.fun/:path*"
+      "destination": "https://api.predict.fun/v1/:path*"
     },
     {
       "source": "/(.*)",
