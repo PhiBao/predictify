@@ -116,16 +116,26 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
         throw new Error('Outcome not found');
       }
 
-      // Calculate amounts in Wei
-      const sharesInWei = parseEther(sharesToSell.toFixed(6));
-      const usdtInWei = parseEther(totalReceive.toFixed(6));
+      // Use SDK's getLimitOrderAmounts for correct calculation
+      const pricePerShareWei = parseEther(priceNum.toFixed(6));
+      const quantityWei = parseEther(sharesToSell.toFixed(6));
+
+      const amounts = orderBuilder.getLimitOrderAmounts({
+        side: Side.SELL,
+        pricePerShareWei,
+        quantityWei,
+      });
 
       console.log('Sell order amounts:', {
         sharesToSell,
         price: priceNum,
         totalReceive,
-        sharesInWei: sharesInWei.toString(),
-        usdtInWei: usdtInWei.toString(),
+        side: 'SELL',
+        pricePerShare: amounts.pricePerShare.toString(),
+        makerAmount: amounts.makerAmount.toString(),
+        takerAmount: amounts.takerAmount.toString(),
+        makerAmountFormatted: formatEther(amounts.makerAmount),
+        takerAmountFormatted: formatEther(amounts.takerAmount),
       });
 
       // Build SELL order
@@ -134,8 +144,8 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
         signer: address,
         side: Side.SELL,
         tokenId: outcome.onChainId,
-        makerAmount: sharesInWei.toString(), // shares to sell
-        takerAmount: usdtInWei.toString(), // USDT to receive
+        makerAmount: amounts.makerAmount,
+        takerAmount: amounts.takerAmount,
         nonce: 0n,
         feeRateBps: String(market.feeRateBps || 0),
       });
@@ -151,15 +161,10 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
       const signedOrder = await orderBuilder.signTypedDataOrder(typedData);
       const hash = orderBuilder.buildTypedDataHash(typedData);
 
-      // Calculate pricePerShare properly (USDT per share, in Wei terms)
-      // This should be: takerAmount / makerAmount (but we need to preserve precision)
-      // For SELL: price per share = USDT received / shares sold
-      const pricePerShareInWei = parseEther(priceNum.toFixed(6));
-
       const orderPayload = {
         data: {
           order: { ...signedOrder, hash },
-          pricePerShare: pricePerShareInWei.toString(),
+          pricePerShare: amounts.pricePerShare.toString(),
           strategy: 'LIMIT',
         },
       };

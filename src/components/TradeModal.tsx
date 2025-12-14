@@ -24,7 +24,7 @@ export function TradeModal({ market, outcome, onClose }: TradeModalProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [approvalStep, setApprovalStep] = useState<string>('');
-
+  const totalCost = (parseFloat(price) * parseFloat(quantity)).toFixed(2);
   const handleTrade = async () => {
     if (!address || !isConnected || !orderBuilder) {
       setError('Please connect your wallet first');
@@ -270,8 +270,6 @@ export function TradeModal({ market, outcome, onClose }: TradeModalProps) {
     }
   };
 
-  const totalCost = (parseFloat(price) * parseFloat(quantity)).toFixed(2);
-
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-content" onClick={(e) => e.stopPropagation()}>
@@ -349,7 +347,7 @@ export function TradeModal({ market, outcome, onClose }: TradeModalProps) {
           </div>
 
           <div className="total">
-            <span>Total Cost:</span>
+            <span>{side === Side.BUY ? 'Total Cost:' : 'You Receive:'}</span>
             <span className="total-amount">{totalCost} USDT</span>
           </div>
 
