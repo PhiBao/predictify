@@ -22,6 +22,14 @@ export interface Market {
   feeRateBps: number;
   isNegRisk: boolean;
   isYieldBearing: boolean;
+  conditionId?: string;
+  condition?: { id: string };
+  /** ISO 8601 timestamp when market closes / resolves */
+  endTime?: string;
+  /** Alternative field for close time from API */
+  closesAt?: string;
+  /** ISO 8601 timestamp when market was resolved */
+  resolvedAt?: string;
 }
 
 export interface Position {
@@ -42,4 +50,30 @@ export interface Order {
   price: string;
   amount: string;
   status: string;
+}
+
+export interface MarketAnalysis {
+  sentiment: 'bullish' | 'bearish' | 'neutral';
+  confidence: number;
+  summary: string;
+  keyFactors: string[];
+  riskLevel: 'low' | 'medium' | 'high';
+  recommendedAction: string;
+  timestamp: string;
+}
+
+export interface APIResponse<T> {
+  success: boolean;
+  data?: T;
+  message?: string;
+}
+
+export interface AuthMessageResponse {
+  message: string;
+  data?: { message: string };
+}
+
+export interface JWTResponse {
+  token?: string;
+  data?: { token: string };
 }

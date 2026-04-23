@@ -14,8 +14,8 @@ export default defineConfig(({ mode }) => {
           target: 'https://api.predict.fun',
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/api/, '/v1'),
-          configure: (proxy, _options) => {
-            proxy.on('proxyReq', (proxyReq, req, _res) => {
+          configure: (proxy) => {
+            proxy.on('proxyReq', (proxyReq, req) => {
               // Add API key from environment to all proxied requests
               const apiKey = env.VITE_API_KEY;
               if (apiKey) {

@@ -7,7 +7,7 @@ import { parseEther, formatEther } from 'ethers';
 import { predictAPI } from '../services/predictAPI';
 
 interface SellModalProps {
-  position: any;
+  position: Record<string, unknown>;
   onClose: () => void;
   onSuccess: () => void;
 }
@@ -17,15 +17,21 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
   const { data: walletClient } = useWalletClient();
   const { orderBuilder, isReady } = usePredictSDK();
   const { showToast } = useToast();
-  
-  const totalShares = parseFloat(formatEther(position.amount));
+
+  const amountRaw = typeof position.amount === 'string' ? position.amount : '0';
+  const totalShares = parseFloat(formatEther(amountRaw));
+
   const [percentage, setPercentage] = useState(100);
   const [price, setPrice] = useState('0.5');
   const [loading, setLoading] = useState(false);
-  const [approvalStep, setApprovalStep] = useState<string>('');
+  const [approvalStep, setApprovalStep] = useState('');
 
   const sharesToSell = (totalShares * percentage) / 100;
-  const totalReceive = sharesToSell * parseFloat(price);
+  const priceNum = parseFloat(price) || 0;
+  const totalReceive = sharesToSell * priceNum;
+
+  const market = position.market as Record<string, unknown> | undefined;
+  const positionOutcome = position.outcome as Record<string, unknown> | undefined;
 
   const handleSell = async () => {
     if (!address || !walletClient || !isReady || !orderBuilder) {
@@ -38,9 +44,8 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
       return;
     }
 
-    const priceNum = parseFloat(price);
-    if (priceNum <= 0 || priceNum >= 1) {
-      showToast('Price must be between 0 and 1', 'error');
+    if (priceNum <= 0.01 || priceNum >= 0.99) {
+      showToast('Price must be between 0.01 and 0.99', 'error');
       return;
     }
 
@@ -48,75 +53,50 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
     setApprovalStep('');
 
     try {
-      const market = position.market;
-
-      // Step 1: Handle approvals for selling shares
-      if (orderBuilder.contracts) {
-        // Determine the correct exchange based on market type
-        const exchangeKey = market.isNegRisk
-          ? (market.isYieldBearing ? 'YIELD_BEARING_NEG_RISK_CTF_EXCHANGE' : 'NEG_RISK_CTF_EXCHANGE')
-          : (market.isYieldBearing ? 'YIELD_BEARING_CTF_EXCHANGE' : 'CTF_EXCHANGE');
-
-        const conditionalTokensKey = market.isYieldBearing ? 'YIELD_BEARING_CONDITIONAL_TOKENS' : 'CONDITIONAL_TOKENS';
-
-        console.log('🔧 Using exchange:', exchangeKey, 'conditionalTokens:', conditionalTokensKey);
-
-        const exchangeAddress = (orderBuilder.contracts as any)[exchangeKey].contract.target;
-        const conditionalTokensContract = (orderBuilder.contracts as any)[conditionalTokensKey].contract;
-
-        // Check if Conditional Tokens are approved for the exchange
-        const isApprovedERC1155 = await conditionalTokensContract.isApprovedForAll(address, exchangeAddress);
-        if (!isApprovedERC1155) {
-          setApprovalStep('Approving your shares for trading...');
-          console.log('Approving ConditionalTokens for', exchangeKey);
-          showToast('Please approve your shares for trading', 'info');
-          const approveTx = await conditionalTokensContract.setApprovalForAll(exchangeAddress, true);
-          console.log('ConditionalTokens approval tx:', approveTx.hash);
-          setApprovalStep('Confirming approval...');
-          await approveTx.wait();
-          console.log('✅ ConditionalTokens approved');
-          showToast('Shares approved successfully!', 'success');
-        } else {
-          console.log('✅ ConditionalTokens already approved');
-        }
+      if (!market) {
+        throw new Error('Market data not available');
       }
 
-      // Step 2: Get JWT token for authentication
-      setApprovalStep('Authenticating...');
-      // Step 2: Get JWT token for authentication
+      // Use SDK helper for approvals
+      setApprovalStep('Checking approvals...');
+      const approvalResult = await orderBuilder.setApprovals();
+      if (!approvalResult.success) {
+        throw new Error('Failed to set token approvals');
+      }
+
+      // Get JWT token for authentication
       setApprovalStep('Authenticating...');
       try {
         const authMessageResponse = await predictAPI.getAuthMessage(address);
-        const message = authMessageResponse.data?.message || authMessageResponse.message;
+        const message = authMessageResponse.data?.message ?? authMessageResponse.message;
         const signature = await walletClient.signMessage({
           account: address,
-          message: message,
+          message,
         });
         const jwtResponse = await predictAPI.getJWT(address, signature, message);
         const jwtToken = jwtResponse?.data?.token;
-        
+
         if (jwtToken) {
           predictAPI.setJWT(jwtToken);
         }
       } catch (authErr) {
         console.log('Authentication warning:', authErr);
-        // Continue anyway - some endpoints might work without JWT
       }
 
-      // Step 3: Build and submit sell order
+      // Build and submit sell order
       setApprovalStep('Creating sell order...');
-      const positionOutcome = position.outcome;
+      const outcomes = market.outcomes as Array<Record<string, unknown>> | undefined;
+      const outcomeOnChainId = positionOutcome?.onChainId as string | undefined;
+      const outcomeIndexSet = positionOutcome?.indexSet as number | undefined;
 
-      // Find outcome
-      const outcome = market.outcomes.find((o: any) => 
-        o.onChainId === positionOutcome.onChainId || o.indexSet === positionOutcome.indexSet
+      const outcome = outcomes?.find((o: Record<string, unknown>) =>
+        o.onChainId === outcomeOnChainId || o.indexSet === outcomeIndexSet
       );
 
       if (!outcome) {
         throw new Error('Outcome not found');
       }
 
-      // Use SDK's getLimitOrderAmounts for correct calculation
       const pricePerShareWei = parseEther(priceNum.toFixed(6));
       const quantityWei = parseEther(sharesToSell.toFixed(6));
 
@@ -126,37 +106,21 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
         quantityWei,
       });
 
-      console.log('Sell order amounts:', {
-        sharesToSell,
-        price: priceNum,
-        totalReceive,
-        side: 'SELL',
-        pricePerShare: amounts.pricePerShare.toString(),
-        makerAmount: amounts.makerAmount.toString(),
-        takerAmount: amounts.takerAmount.toString(),
-        makerAmountFormatted: formatEther(amounts.makerAmount),
-        takerAmountFormatted: formatEther(amounts.takerAmount),
-      });
-
-      // Build SELL order
       const order = orderBuilder.buildOrder('LIMIT', {
         maker: address,
         signer: address,
         side: Side.SELL,
-        tokenId: outcome.onChainId,
+        tokenId: outcome.onChainId as string,
         makerAmount: amounts.makerAmount,
         takerAmount: amounts.takerAmount,
         nonce: 0n,
-        feeRateBps: String(market.feeRateBps || 0),
+        feeRateBps: String((market.feeRateBps as number) || 0),
       });
 
-      // Build typed data and sign
       const typedData = orderBuilder.buildTypedData(order, {
-        isNegRisk: market.isNegRisk,
-        isYieldBearing: market.isYieldBearing,
+        isNegRisk: Boolean(market.isNegRisk),
+        isYieldBearing: Boolean(market.isYieldBearing),
       });
-
-      console.log('Typed data for sell:', typedData);
 
       const signedOrder = await orderBuilder.signTypedDataOrder(typedData);
       const hash = orderBuilder.buildTypedDataHash(typedData);
@@ -168,8 +132,6 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
           strategy: 'LIMIT',
         },
       };
-
-      console.log('Submitting sell order:', orderPayload);
 
       const result = await predictAPI.createOrder(orderPayload);
 
@@ -186,26 +148,31 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
       showToast(errorMsg, 'error');
     } finally {
       setLoading(false);
+      setApprovalStep('');
     }
   };
+
+  const marketQuestion = (market?.question as string) || 'Unknown Market';
+  const outcomeName = (positionOutcome?.name as string) || 'Unknown';
+  const feeRateBps = (market?.feeRateBps as number) || 0;
 
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-content" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <h2>Sell {position.outcome?.name} Shares</h2>
-          <button className="close-btn" onClick={onClose}>×</button>
+          <h2>Sell {outcomeName} Shares</h2>
+          <button className="close-btn" onClick={onClose} aria-label="Close modal">×</button>
         </div>
 
         <div className="modal-body">
           <div className="sell-info">
             <div className="info-row">
               <span>Market:</span>
-              <span className="info-value">{position.market?.question}</span>
+              <span className="info-value">{marketQuestion}</span>
             </div>
             <div className="info-row">
               <span>Your Position:</span>
-              <span className="info-value outcome-badge">{position.outcome?.name}</span>
+              <span className="info-value outcome-badge">{outcomeName}</span>
             </div>
             <div className="info-row">
               <span>Available Shares:</span>
@@ -252,11 +219,11 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
             </div>
             <div className="summary-row">
               <span>At price:</span>
-              <span className="summary-value">${parseFloat(price).toFixed(2)} per share</span>
+              <span className="summary-value">${priceNum.toFixed(2)} per share</span>
             </div>
             <div className="summary-row">
               <span>Market Fee:</span>
-              <span className="summary-value">{((position.market?.feeRateBps || 0) / 100).toFixed(2)}%</span>
+              <span className="summary-value">{(feeRateBps / 100).toFixed(2)}%</span>
             </div>
             <div className="summary-row total">
               <span>Total Cost:</span>
@@ -269,7 +236,7 @@ export function SellModal({ position, onClose, onSuccess }: SellModalProps) {
           <button className="btn btn-secondary" onClick={onClose} disabled={loading}>
             Cancel
           </button>
-          <button 
+          <button
             className="btn btn-sell"
             onClick={handleSell}
             disabled={loading || sharesToSell === 0}

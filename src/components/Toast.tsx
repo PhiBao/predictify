@@ -1,5 +1,4 @@
 import { useEffect } from 'react';
-import '../styles/Toast.css';
 
 export type ToastType = 'success' | 'error' | 'info' | 'warning';
 
@@ -19,16 +18,18 @@ export function Toast({ message, type, onClose, duration = 5000 }: ToastProps) {
     return () => clearTimeout(timer);
   }, [duration, onClose]);
 
+  const iconMap = {
+    success: '✓',
+    error: '✕',
+    info: 'ℹ',
+    warning: '⚠',
+  };
+
   return (
-    <div className={`toast toast-${type}`}>
-      <div className="toast-icon">
-        {type === 'success' && '✓'}
-        {type === 'error' && '✕'}
-        {type === 'info' && 'ℹ'}
-        {type === 'warning' && '⚠'}
-      </div>
+    <div className={`toast toast-${type}`} role="alert" aria-live="polite">
+      <div className="toast-icon">{iconMap[type]}</div>
       <div className="toast-message">{message}</div>
-      <button className="toast-close" onClick={onClose}>×</button>
+      <button className="toast-close" onClick={onClose} aria-label="Close notification">×</button>
     </div>
   );
 }

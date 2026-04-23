@@ -10,31 +10,42 @@ export function usePredictSDK() {
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
+
     async function initSDK() {
       if (!walletClient || !address) {
-        setOrderBuilder(null);
-        setIsReady(false);
+        if (!cancelled) {
+          setOrderBuilder(null);
+          setIsReady(false);
+        }
         return;
       }
 
       try {
-        // Create ethers provider from wagmi wallet client
-        const provider = new BrowserProvider(walletClient as any);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const provider = new BrowserProvider(walletClient.transport as any);
         const signer = await provider.getSigner();
-
-        // Initialize OrderBuilder with BNB mainnet
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const builder = await OrderBuilder.make(ChainId.BnbMainnet, signer as any);
-        
-        setOrderBuilder(builder);
-        setIsReady(true);
+
+        if (!cancelled) {
+          setOrderBuilder(builder);
+          setIsReady(true);
+        }
       } catch (error) {
         console.error('Failed to initialize SDK:', error);
-        setOrderBuilder(null);
-        setIsReady(false);
+        if (!cancelled) {
+          setOrderBuilder(null);
+          setIsReady(false);
+        }
       }
     }
 
     initSDK();
+
+    return () => {
+      cancelled = true;
+    };
   }, [address, walletClient]);
 
   return {

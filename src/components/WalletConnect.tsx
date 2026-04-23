@@ -6,6 +6,7 @@ export function WalletConnect() {
       <ConnectButton 
         showBalance={false}
         chainStatus="icon"
+        accountStatus="address"
       />
     </div>
   );
