@@ -1,3 +1,8 @@
+export interface PriceLevel {
+  price: string;
+  size: string;
+}
+
 export interface Outcome {
   id: string;
   name: string;
@@ -5,8 +10,16 @@ export interface Outcome {
   indexSet: number;
   status: string | null;
   onChainId: string;
-  bestBid?: string;
-  bestAsk?: string;
+  /** API may return string or {price, size} object */
+  bestBid?: string | PriceLevel;
+  bestAsk?: string | PriceLevel;
+}
+
+/** Safely extract a display string from bestBid/bestAsk */
+export function formatPriceLevel(value: string | PriceLevel | undefined): string {
+  if (!value) return '';
+  if (typeof value === 'string') return value;
+  return value.price ?? '';
 }
 
 export interface Market {

@@ -4,8 +4,10 @@ import { WalletConnect } from './components/WalletConnect';
 import { MarketsList } from './components/MarketsList';
 import { UserPositions } from './components/UserPositions';
 import { MarketDetail } from './components/MarketDetail';
+import { MarketGroupDetail } from './components/MarketGroupDetail';
 import { ToastProvider } from './contexts/ToastContext';
 import { ScrollToTop } from './components/ScrollToTop';
+import { useNetworkState } from './hooks/useNetworkState';
 import './App.css';
 
 function HomePage() {
@@ -78,6 +80,33 @@ function HomePage() {
   );
 }
 
+function NetworkBadge() {
+  const { isConnected } = useAccount();
+  const network = useNetworkState();
+
+  if (!isConnected || network.isChecking) return null;
+
+  if (network.current === 'genlayer') {
+    return (
+      <span className="nav-network-badge genlayer">
+        <span className="network-dot" />
+        GenLayer
+      </span>
+    );
+  }
+
+  if (network.current === 'bnb') {
+    return (
+      <span className="nav-network-badge bnb">
+        <span className="network-dot still" />
+        BNB Chain
+      </span>
+    );
+  }
+
+  return null;
+}
+
 function App() {
   const location = useLocation();
   const isMarketPage = location.pathname.startsWith('/market/');
@@ -93,14 +122,15 @@ function App() {
                 <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" fill="none"/>
                 <path d="M12 6v6l4 2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
               </svg>
-              Predict.fun
+              Predictify
             </a>
             <div className="nav-links">
-              <a href="/#markets" className="nav-link">Markets</a>
+              <a href="/" className="nav-link">Markets</a>
               <a href="/#positions" className="nav-link">Positions</a>
               <a href="https://dev.predict.fun" target="_blank" rel="noopener noreferrer" className="nav-link">Docs</a>
             </div>
             <div className="nav-actions">
+              <NetworkBadge />
               <WalletConnect />
             </div>
           </div>
@@ -109,6 +139,7 @@ function App() {
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/market/:id" element={<MarketDetail />} />
+          <Route path="/market/group/:categorySlug" element={<MarketGroupDetail />} />
         </Routes>
 
         {/* Footer - hide on market detail for cleaner focus */}

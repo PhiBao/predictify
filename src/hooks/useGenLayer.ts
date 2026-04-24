@@ -52,6 +52,8 @@ export function useGenLayerAnalysis(): UseGenLayerAnalysisReturn {
         else if (p.stage === 'proposing') setTxStatus('Leader validator proposing result' + elapsed);
         else if (p.stage === 'verifying') setTxStatus('Consensus validators verifying' + elapsed);
         else if (p.stage === 'finalizing') setTxStatus('Finalizing on-chain' + elapsed);
+        else if (p.stage === 'completed') setTxStatus('Result finalized on-chain' + elapsed);
+        else if (p.stage === 'fetching_result') setTxStatus(`Fetching result from contract (attempt ${p.attempt})...`);
       });
 
       setAnalysis(result);
@@ -61,6 +63,7 @@ export function useGenLayerAnalysis(): UseGenLayerAnalysisReturn {
       setError(message);
       setTxStatus('Failed');
       console.error('GenLayer analysis error:', err);
+      throw err;
     } finally {
       setLoading(false);
     }

@@ -22,7 +22,6 @@ const RISK_CONFIG = {
   high: { label: 'High Risk', color: '#ff3b30' },
 };
 
-/** Convert simple markdown links to HTML */
 function renderMarkdown(text: string): string {
   let html = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
@@ -30,18 +29,26 @@ function renderMarkdown(text: string): string {
   return html;
 }
 
-export function MarketDetail() {
-  const { id } = useParams<{ id: string }>();
+/** Convert a slug like "number-of-cz-tweets" to "Number Of Cz Tweets" */
+function unsanitizeSlug(slug: string): string {
+  return slug
+    .replace(/-/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+export function MarketGroupDetail() {
+  const { categorySlug } = useParams<{ categorySlug: string }>();
   const navigate = useNavigate();
   const { address, isConnected } = useAccount();
+  const network = useNetworkState();
   const { isReady } = usePredictSDK();
   const { showToast } = useToast();
-  const network = useNetworkState();
 
-  const [market, setMarket] = useState<Market | null>(null);
+  const [groupMarkets, setGroupMarkets] = useState<Market[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const [tradeMarket, setTradeMarket] = useState<Market | null>(null);
   const [tradeOutcome, setTradeOutcome] = useState<Outcome | null>(null);
   const [showTradeModal, setShowTradeModal] = useState(false);
 
@@ -67,32 +74,68 @@ export function MarketDetail() {
   useEffect(() => {
     let cancelled = false;
 
-    async function fetchMarket() {
-      if (!id) return;
+    async function fetchGroup() {
+      if (!categorySlug) return;
       try {
         setLoading(true);
         setError(null);
-        const data = await predictAPI.getMarket(id);
+
+        const decodedSlug = decodeURIComponent(categorySlug).trim();
+
+        // Try API category filter first, then fall back to full list
+        let marketsData: Market[] = [];
+        try {
+          const filteredData = await predictAPI.getMarkets({ category: decodedSlug, limit: 200 });
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const raw = filteredData as any;
+          marketsData = Array.isArray(raw.data) ? raw.data : [];
+        } catch {
+          // API category filter may not be supported; fall through
+        }
+
+        // If API filter returned nothing, fetch all and filter client-side
+        if (marketsData.length === 0) {
+          const allData = await predictAPI.getMarkets({ limit: 500 });
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const raw = allData as any;
+          const allMarkets: Market[] = Array.isArray(raw.data) ? raw.data : [];
+          const slugLower = decodedSlug.toLowerCase();
+          marketsData = allMarkets.filter((m) =>
+            m.categorySlug?.trim().toLowerCase() === slugLower
+          );
+        }
+
         if (cancelled) return;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const raw = data as any;
-        const marketData = raw.data ?? raw;
-        setMarket(marketData as Market);
+
+        if (marketsData.length === 0) {
+          setError('No markets found for this group.');
+        } else {
+          setGroupMarkets(marketsData);
+        }
       } catch (err) {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : 'Failed to load market');
+        setError(err instanceof Error ? err.message : 'Failed to load markets');
       } finally {
         if (!cancelled) setLoading(false);
       }
     }
 
-    fetchMarket();
+    fetchGroup();
     return () => { cancelled = true; };
-  }, [id]);
+  }, [categorySlug]);
 
-  const statusClass = market?.status?.toLowerCase() || 'open';
+  const firstMarket = groupMarkets[0];
 
-  const handleTrade = async (outcome: Outcome) => {
+  const displayTitle = useMemo(() => {
+    if (!firstMarket) return '';
+    const allSameQuestion = groupMarkets.every((m) => m.question === firstMarket.question);
+    if (allSameQuestion && firstMarket.question && firstMarket.question !== firstMarket.categorySlug) {
+      return firstMarket.question;
+    }
+    return unsanitizeSlug(firstMarket.categorySlug);
+  }, [firstMarket, groupMarkets]);
+
+  const handleTrade = async (market: Market, outcome: Outcome) => {
     if (!isConnected) {
       showToast('Connect your wallet to trade', 'warning');
       return;
@@ -103,7 +146,6 @@ export function MarketDetail() {
       showToast('Switching to BNB Chain...', 'info');
       try {
         await network.switchToBSC();
-        // After switching, continue to open trade modal
       } catch (err) {
         showToast(err instanceof Error ? err.message : 'Network switch failed', 'error');
         return;
@@ -115,12 +157,13 @@ export function MarketDetail() {
       return;
     }
 
+    setTradeMarket(market);
     setTradeOutcome(outcome);
     setShowTradeModal(true);
   };
 
   const handleAnalyze = async () => {
-    if (!isConnected || !address || !market) {
+    if (!isConnected || !address || !firstMarket) {
       showToast('Please connect your wallet first', 'warning');
       return;
     }
@@ -144,12 +187,16 @@ export function MarketDetail() {
 
     setAnalysisStep('processing');
 
+    const allOutcomeNames = Array.from(
+      new Set(groupMarkets.flatMap((m) => m.outcomes.map((o) => o.name)))
+    );
+
     try {
       await analyze({
-        marketQuestion: market.question,
-        marketDescription: market.description,
-        category: market.categorySlug,
-        outcomeNames: market.outcomes.map(o => o.name),
+        marketQuestion: displayTitle,
+        marketDescription: firstMarket.description,
+        category: firstMarket.categorySlug,
+        outcomeNames: allOutcomeNames,
       }, genAmount, address);
 
       setAnalysisStep('result');
@@ -170,24 +217,24 @@ export function MarketDetail() {
   const minFeeGen = Number(minFee) / 10 ** 18;
 
   const descriptionHtml = useMemo(() => {
-    if (!market?.description) return '';
-    return renderMarkdown(market.description);
-  }, [market?.description]);
+    if (!firstMarket?.description) return '';
+    return renderMarkdown(firstMarket.description);
+  }, [firstMarket?.description]);
 
   if (loading) {
     return (
       <div className="market-detail-loading">
         <div className="loading-spinner"></div>
-        <p>Loading market...</p>
+        <p>Loading market group...</p>
       </div>
     );
   }
 
-  if (error || !market) {
+  if (error || !firstMarket) {
     return (
       <div className="market-detail-error">
-        <h2>Market not found</h2>
-        <p>{error || 'This market does not exist or has been removed.'}</p>
+        <h2>Market group not found</h2>
+        <p>{error || 'This market group does not exist or has been removed.'}</p>
         <button className="btn-pill btn-pill-primary" onClick={() => navigate('/')}>
           Back to Markets
         </button>
@@ -195,9 +242,10 @@ export function MarketDetail() {
     );
   }
 
+  const statusClass = firstMarket.status?.toLowerCase() || 'open';
+
   return (
     <div className="market-detail">
-      {/* Header */}
       <div className="market-detail-hero">
         <div className="market-detail-content">
           <button className="back-link" onClick={() => navigate(-1)}>
@@ -205,29 +253,29 @@ export function MarketDetail() {
           </button>
 
           <div className="market-detail-header">
-            {market.imageUrl && (
+            {firstMarket.imageUrl && (
               <div className="market-detail-image">
-                <img src={market.imageUrl} alt={market.question} />
+                <img src={firstMarket.imageUrl} alt={displayTitle} />
               </div>
             )}
             <div className="market-detail-info">
               <div className="market-detail-badges">
                 <span className={`market-status-badge ${statusClass}`}>
-                  {market.status || 'OPEN'}
+                  {firstMarket.status || 'OPEN'}
                 </span>
-                <span className="market-detail-category">{market.categorySlug}</span>
+                <span className="market-detail-category">{firstMarket.categorySlug}</span>
               </div>
-              <h1 className="market-detail-title">{market.question}</h1>
+              <h1 className="market-detail-title">{displayTitle}</h1>
               <div className="market-detail-meta">
-                <span>Fee: {(market.feeRateBps / 100).toFixed(2)}%</span>
-                {market.isYieldBearing && <span className="meta-tag">Yield Bearing</span>}
-                {market.isNegRisk && <span className="meta-tag">Neg Risk</span>}
+                <span>Fee: {(firstMarket.feeRateBps / 100).toFixed(2)}%</span>
+                {firstMarket.isYieldBearing && <span className="meta-tag">Yield Bearing</span>}
+                {firstMarket.isNegRisk && <span className="meta-tag">Neg Risk</span>}
+                <span className="meta-tag">{groupMarkets.length} Markets</span>
               </div>
             </div>
           </div>
 
-          {/* Description */}
-          {market.description && (
+          {firstMarket.description && (
             <div className="market-detail-description">
               <h3>About this market</h3>
               <div
@@ -237,50 +285,57 @@ export function MarketDetail() {
             </div>
           )}
 
-          {/* Outcomes */}
+          {/* Grouped Markets */}
           <div className="market-detail-outcomes">
-            <h3>Outcomes</h3>
-            <div className="outcomes-grid">
-              {market.outcomes.map((outcome) => (
-                <div key={outcome.onChainId} className="outcome-card">
-                  <div className="outcome-card-header">
-                    <span className="outcome-card-name">{outcome.name}</span>
-                    {outcome.status && (
-                      <span className="outcome-card-status">{outcome.status}</span>
-                    )}
+            <h3>Markets</h3>
+            <div className="market-group-rows">
+              {groupMarkets.map((market) => (
+                <div key={market.id} className="market-group-row">
+                  <div className="market-group-row-title">{market.title}</div>
+                  <div className="outcomes-grid">
+                    {market.outcomes.map((outcome) => (
+                      <div key={outcome.onChainId} className="outcome-card">
+                        <div className="outcome-card-header">
+                          <span className="outcome-card-name">{outcome.name}</span>
+                          {outcome.status && (
+                            <span className="outcome-card-status">{outcome.status}</span>
+                          )}
+                        </div>
+                        <div className="outcome-card-prices">
+                          {outcome.bestBid && (
+                            <span className="outcome-price bid">Bid: {formatPriceLevel(outcome.bestBid)}</span>
+                          )}
+                          {outcome.bestAsk && (
+                            <span className="outcome-price ask">Ask: {formatPriceLevel(outcome.bestAsk)}</span>
+                          )}
+                        </div>
+                        <button
+                          className={`outcome-trade-btn ${network.current === 'genlayer' ? 'needs-switch' : ''}`}
+                          onClick={() => handleTrade(market, outcome)}
+                          disabled={!isConnected || network.isSwitching}
+                          title={
+                            !isConnected
+                              ? 'Connect your wallet to trade'
+                              : network.isSwitching
+                                ? 'Switching networks...'
+                                : network.current === 'genlayer'
+                                  ? 'Click to switch to BNB Chain and trade'
+                                  : !isReady
+                                    ? 'SDK initializing...'
+                                    : 'Trade this outcome'
+                          }
+                        >
+                          {!isConnected
+                            ? 'Connect Wallet to Trade'
+                            : network.isSwitching
+                              ? 'Switching...'
+                              : network.current === 'genlayer'
+                                ? 'Switch to BNB Chain'
+                                : 'Trade'}
+                        </button>
+                      </div>
+                    ))}
                   </div>
-                  <div className="outcome-card-prices">
-                    {outcome.bestBid && (
-                      <span className="outcome-price bid">Bid: {formatPriceLevel(outcome.bestBid)}</span>
-                    )}
-                    {outcome.bestAsk && (
-                      <span className="outcome-price ask">Ask: {formatPriceLevel(outcome.bestAsk)}</span>
-                    )}
-                  </div>
-                  <button
-                    className={`outcome-trade-btn ${network.current === 'genlayer' ? 'needs-switch' : ''}`}
-                    onClick={() => handleTrade(outcome)}
-                    disabled={!isConnected || network.isSwitching}
-                    title={
-                      !isConnected
-                        ? 'Connect your wallet to trade'
-                        : network.isSwitching
-                          ? 'Switching networks...'
-                          : network.current === 'genlayer'
-                            ? 'Click to switch to BNB Chain and trade'
-                            : !isReady
-                              ? 'SDK initializing...'
-                              : 'Trade this outcome'
-                    }
-                  >
-                    {!isConnected
-                      ? 'Connect Wallet to Trade'
-                      : network.isSwitching
-                        ? 'Switching...'
-                        : network.current === 'genlayer'
-                          ? 'Switch to BNB Chain'
-                          : 'Trade'}
-                  </button>
                 </div>
               ))}
             </div>
@@ -320,7 +375,7 @@ export function MarketDetail() {
                 {isConnected && !network.isChecking && network.current === 'genlayer' && (
                   <>
                     <p className="analysis-intro">
-                      Get an AI-powered analysis of this market from GenLayer validators.
+                      Get an AI-powered analysis of this market group from GenLayer validators.
                       Pay with GEN tokens to fund the consensus process.
                     </p>
 
@@ -488,13 +543,14 @@ export function MarketDetail() {
         </div>
       </div>
 
-      {showTradeModal && tradeOutcome && (
+      {showTradeModal && tradeMarket && tradeOutcome && (
         <TradeModal
-          market={market}
+          market={tradeMarket}
           outcome={tradeOutcome}
           onClose={() => {
             setShowTradeModal(false);
             setTradeOutcome(null);
+            setTradeMarket(null);
           }}
         />
       )}

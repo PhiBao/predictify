@@ -74,17 +74,18 @@ function determineResult(position: PositionData): {
     return { result: 'unknown' };
   }
 
-  const marketStatus = market.status;
+  const marketStatus = (market.status || '').toUpperCase();
   const isResolved =
     marketStatus === 'RESOLVED' ||
     marketStatus === 'CLOSED' ||
     marketStatus === 'SETTLED';
 
   const outcomes = market.outcomes ?? [];
+  const userStatus = (positionOutcome.status || '').toUpperCase();
 
-  // 1. Find the explicit winning outcome from market outcomes
+  // 1. Explicit winner in market outcomes — most reliable signal
   const winningOutcome = outcomes.find((o) => {
-    const s = o.status?.toUpperCase() || '';
+    const s = (o.status || '').toUpperCase();
     return s === 'WIN' || s === 'WINNER' || s === 'WON';
   });
 
@@ -96,37 +97,40 @@ function determineResult(position: PositionData): {
     return { result: isWinning ? 'win' : 'loss', winningOutcome };
   }
 
-  // 2. Market is resolved but no explicit winner found
-  if (isResolved) {
-    const userStatus = (positionOutcome.status || '').toUpperCase();
+  // 2. User's own outcome explicitly marked as lost
+  if (userStatus === 'LOSS' || userStatus === 'LOST' || userStatus === 'LOSE' || userStatus === 'LOSER') {
+    return { result: 'loss' };
+  }
 
+  // 3. Market is resolved but we can't determine the winner from outcomes data.
+  //    Be conservative: only show 'win' if the user's outcome is explicitly marked WIN.
+  //    Otherwise show 'unknown' so user can manually check.
+  if (isResolved) {
     if (userStatus === 'WIN' || userStatus === 'WINNER' || userStatus === 'WON') {
-      // User's own outcome claims win, but we couldn't verify it against market outcomes.
-      // Trust it but flag as pending until market outcomes reflect the result.
+      // User's outcome says it won, but market outcomes don't confirm.
+      // This could be stale data. Show as pending to avoid false winner badge.
       return { result: 'pending' };
     }
 
-    if (userStatus === 'LOSS' || userStatus === 'LOST' || userStatus === 'LOSE' || userStatus === 'LOSER') {
-      return { result: 'loss' };
-    }
-
-    // If every other outcome has a non-WIN status and user's doesn't, it's likely a loss
-    const anyOtherWin = outcomes.some((o) => {
+    // If every other outcome is explicitly not-WIN and user's isn't either → likely loss
+    const everyOutcomeHasStatus = outcomes.length > 0 && outcomes.every((o) => {
       const s = (o.status || '').toUpperCase();
-      return s === 'WIN' || s === 'WINNER' || s === 'WON';
+      return s !== '';
     });
 
-    if (anyOtherWin) {
-      // This shouldn't happen because we search for winningOutcome above,
-      // but as a safety net: if some other outcome is WIN, user lost.
+    if (everyOutcomeHasStatus && outcomes.some((o) => {
+      const s = (o.status || '').toUpperCase();
+      return s === 'WIN' || s === 'WINNER' || s === 'WON';
+    })) {
+      // Some outcome is marked winner but it didn't match user's — user lost
       return { result: 'loss' };
     }
 
-    // Cannot determine — show as unknown rather than guessing
+    // Default: unknown (don't guess)
     return { result: 'unknown' };
   }
 
-  // 3. Market still open
+  // 4. Market still open
   return { result: 'pending' };
 }
 
@@ -219,6 +223,20 @@ export function UserPositions() {
     saveHiddenPositions(address, next);
   };
 
+  const handleClearAllResolved = () => {
+    if (!address) return;
+    const resolvedKeys = positions
+      .filter((p) => {
+        const { result } = determineResult(p);
+        return result === 'win' || result === 'loss' || result === 'unknown';
+      })
+      .map((p) => getPositionKey(p));
+    const next = [...new Set([...hiddenPositions, ...resolvedKeys])];
+    setHiddenPositions(next);
+    saveHiddenPositions(address, next);
+    showToast('All resolved positions cleared from view', 'success');
+  };
+
   const handleClaim = async (position: PositionData) => {
     if (!address || !walletClient || !isReady || !orderBuilder) {
       showToast('Wallet not connected or SDK not ready', 'error');
@@ -307,6 +325,10 @@ export function UserPositions() {
 
   const visiblePositions = positions.filter((p) => !hiddenPositions.includes(getPositionKey(p)));
   const dismissedPositions = positions.filter((p) => hiddenPositions.includes(getPositionKey(p)));
+  const resolvedVisibleCount = visiblePositions.filter((p) => {
+    const { result } = determineResult(p);
+    return result === 'win' || result === 'loss' || result === 'unknown';
+  }).length;
 
   if (positions.length === 0) {
     return (
@@ -446,7 +468,18 @@ export function UserPositions() {
 
   return (
     <div className="user-positions">
-      <h2 className="section-title light">Your Positions</h2>
+      <div className="positions-header">
+        <h2 className="section-title light">Your Positions</h2>
+        {resolvedVisibleCount > 0 && (
+          <button
+            className="btn-clear-all"
+            onClick={handleClearAllResolved}
+            title="Hide all resolved positions"
+          >
+            Clear Resolved
+          </button>
+        )}
+      </div>
 
       <div className="positions-list">
         {visiblePositions.map((p) => renderPositionCard(p, false))}

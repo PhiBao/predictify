@@ -3,6 +3,7 @@ import { useAccount, useWalletClient } from 'wagmi';
 import { usePredictSDK } from '../hooks/usePredictSDK';
 import { useToast } from '../contexts/ToastContext';
 import type { Market, Outcome } from '../types/predict';
+import { formatPriceLevel } from '../types/predict';
 import { parseEther, formatEther } from 'ethers';
 import { PredictAPI } from '../services/predictAPI';
 import { Side } from '@predictdotfun/sdk';
@@ -13,21 +14,29 @@ interface TradeModalProps {
   onClose: () => void;
 }
 
+type OrderType = 'market' | 'limit';
+
 export function TradeModal({ market, outcome, onClose }: TradeModalProps) {
   const { address, isConnected } = useAccount();
   const { data: walletClient } = useWalletClient();
   const { orderBuilder, isReady } = usePredictSDK();
   const { showToast } = useToast();
   const [side, setSide] = useState<Side>(Side.BUY);
+  const [orderType, setOrderType] = useState<OrderType>('limit');
   const [price, setPrice] = useState('0.5');
   const [quantity, setQuantity] = useState('10');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [approvalStep, setApprovalStep] = useState('');
 
-  const priceNum = parseFloat(price) || 0;
+  // Compute market price from orderbook if available
+  const marketPrice = side === Side.BUY
+    ? (outcome.bestAsk ? parseFloat(formatPriceLevel(outcome.bestAsk)) || 0.5 : 0.5)
+    : (outcome.bestBid ? parseFloat(formatPriceLevel(outcome.bestBid)) || 0.5 : 0.5);
+
+  const effectivePrice = orderType === 'market' ? marketPrice : (parseFloat(price) || 0);
   const quantityNum = parseFloat(quantity) || 0;
-  const totalCost = (priceNum * quantityNum).toFixed(2);
+  const totalCost = (effectivePrice * quantityNum).toFixed(2);
 
   const handleTrade = async () => {
     if (!address || !isConnected || !orderBuilder) {
@@ -40,8 +49,8 @@ export function TradeModal({ market, outcome, onClose }: TradeModalProps) {
       return;
     }
 
-    if (priceNum <= 0.01 || priceNum >= 0.99) {
-      setError('Price must be between 0.01 and 0.99 USDT');
+    if (orderType === 'limit' && (effectivePrice <= 0.01 || effectivePrice >= 0.99)) {
+      setError('Limit price must be between 0.01 and 0.99 USDT');
       return;
     }
 
@@ -54,7 +63,7 @@ export function TradeModal({ market, outcome, onClose }: TradeModalProps) {
       setLoading(true);
       setError(null);
 
-      const pricePerShareWei = parseEther(priceNum.toFixed(6));
+      const pricePerShareWei = parseEther(effectivePrice.toFixed(6));
       const quantityWei = parseEther(quantityNum.toFixed(6));
 
       const amounts = orderBuilder.getLimitOrderAmounts({
@@ -220,18 +229,45 @@ export function TradeModal({ market, outcome, onClose }: TradeModalProps) {
             </button>
           </div>
 
-          <div className="form-group">
-            <label>Price per share (USDT)</label>
-            <input
-              type="number"
-              min="0.01"
-              max="0.99"
-              step="0.01"
-              value={price}
-              onChange={(e) => setPrice(e.target.value)}
-            />
-            <small>Between 0.01 and 0.99 USDT</small>
+          <div className="order-type-toggle">
+            <button
+              className={`type-btn ${orderType === 'market' ? 'active' : ''}`}
+              onClick={() => setOrderType('market')}
+            >
+              Market
+            </button>
+            <button
+              className={`type-btn ${orderType === 'limit' ? 'active' : ''}`}
+              onClick={() => setOrderType('limit')}
+            >
+              Limit
+            </button>
           </div>
+
+          {orderType === 'market' && (
+            <div className="market-price-display">
+              <label>Market Price</label>
+              <div className="market-price-value">
+                ${marketPrice.toFixed(2)} USDT
+                <small>{side === Side.BUY ? 'Best Ask' : 'Best Bid'}</small>
+              </div>
+            </div>
+          )}
+
+          {orderType === 'limit' && (
+            <div className="form-group">
+              <label>Price per share (USDT)</label>
+              <input
+                type="number"
+                min="0.01"
+                max="0.99"
+                step="0.01"
+                value={price}
+                onChange={(e) => setPrice(e.target.value)}
+              />
+              <small>Between 0.01 and 0.99 USDT</small>
+            </div>
+          )}
 
           <div className="form-group">
             <label>Quantity (shares)</label>
@@ -255,7 +291,7 @@ export function TradeModal({ market, outcome, onClose }: TradeModalProps) {
             disabled={loading || !isConnected || !isReady}
           >
             {loading ? (approvalStep || 'Processing...') :
-              `${side === Side.BUY ? 'Buy' : 'Sell'} ${quantityNum} shares`}
+              `${orderType === 'market' ? 'Market' : 'Limit'} ${side === Side.BUY ? 'Buy' : 'Sell'} ${quantityNum} shares`}
           </button>
 
           <div className="trade-info">

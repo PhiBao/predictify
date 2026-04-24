@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo } from 'react';
 import { MarketCard } from './MarketCard';
+import { GroupedMarketCard, type MarketGroup } from './GroupedMarketCard';
 import { MarketsSkeleton } from './MarketSkeleton';
 import { predictAPI } from '../services/predictAPI';
 import type { Market } from '../types/predict';
@@ -26,6 +27,73 @@ function isLiveMarket(market: Market): boolean {
   }
 
   return true;
+}
+
+/** Convert a slug like "number-of-cz-tweets" to "Number Of Cz Tweets" */
+function unsanitizeSlug(slug: string): string {
+  return slug
+    .replace(/-/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/** Derive a human-readable group title from the markets in the group */
+function deriveGroupTitle(markets: Market[]): string {
+  if (markets.length === 0) return '';
+  // If all markets share the same question, use it
+  const firstQuestion = markets[0].question;
+  const allSameQuestion = markets.every((m) => m.question === firstQuestion);
+  if (allSameQuestion && firstQuestion && firstQuestion !== markets[0].categorySlug) {
+    return firstQuestion;
+  }
+  // Otherwise unsanitize the category slug
+  return unsanitizeSlug(markets[0].categorySlug);
+}
+
+function groupMarkets(markets: Market[]): (Market | MarketGroup)[] {
+  const groups = new Map<string, Market[]>();
+  const singles: Market[] = [];
+
+  for (const market of markets) {
+    // Group by categorySlug so related markets (e.g. CZ tweet ranges) merge into one card
+    const key = market.categorySlug?.trim().toLowerCase() || `market-${market.id}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.push(market);
+    } else {
+      // Check if another market shares this category
+      const hasSibling = markets.some(
+        (m) => m.id !== market.id && m.categorySlug?.trim().toLowerCase() === key
+      );
+      if (hasSibling) {
+        groups.set(key, [market]);
+      } else {
+        singles.push(market);
+      }
+    }
+  }
+
+  const result: (Market | MarketGroup)[] = [...singles];
+
+  for (const [, groupMarkets] of groups) {
+    if (groupMarkets.length === 1) {
+      result.push(groupMarkets[0]);
+    } else {
+      const first = groupMarkets[0];
+      result.push({
+        question: deriveGroupTitle(groupMarkets),
+        imageUrl: first.imageUrl,
+        description: first.description,
+        categorySlug: first.categorySlug,
+        status: first.status,
+        feeRateBps: first.feeRateBps,
+        isNegRisk: first.isNegRisk,
+        isYieldBearing: first.isYieldBearing,
+        markets: groupMarkets,
+      });
+    }
+  }
+
+  return result;
 }
 
 export function MarketsList() {
@@ -73,9 +141,9 @@ export function MarketsList() {
     };
   }, [filter]);
 
-  const filteredMarkets = useMemo(() => {
-    if (filter === 'all') return markets;
-    return markets.filter(isLiveMarket);
+  const filteredItems = useMemo(() => {
+    const liveMarkets = filter === 'live' ? markets.filter(isLiveMarket) : markets;
+    return groupMarkets(liveMarkets);
   }, [markets, filter]);
 
   if (loading) {
@@ -115,7 +183,7 @@ export function MarketsList() {
         </div>
       </div>
 
-      {filteredMarkets.length === 0 ? (
+      {filteredItems.length === 0 ? (
         <div className="no-markets">
           {filter === 'live'
             ? 'No live markets available right now. Try viewing All markets.'
@@ -123,9 +191,12 @@ export function MarketsList() {
         </div>
       ) : (
         <div className="markets-grid">
-          {filteredMarkets.map((market) => (
-            <MarketCard key={market.id} market={market} />
-          ))}
+          {filteredItems.map((item, index) => {
+            if ('markets' in item) {
+              return <GroupedMarketCard key={`group-${index}`} group={item} />;
+            }
+            return <MarketCard key={item.id} market={item} />;
+          })}
         </div>
       )}
     </div>
