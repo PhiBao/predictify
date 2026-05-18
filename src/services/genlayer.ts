@@ -1,387 +1,372 @@
-import { TransactionStatus, ExecutionResult } from 'genlayer-js/types';
-import { createGenLayerClient, getContractAddress } from '../lib/genlayer/client';
+import { createGenLayerClient, switchToGenLayerNetwork, switchToBSC } from '../lib/genlayer/client'
+import type {
+  GenLayerAnalysis,
+  GenLayerResolution,
+  Dispute,
+} from '../types/market'
 
-export const GENLAYER_CONTRACT_ADDRESS = getContractAddress();
+const TransactionStatus = {
+  UNINITIALIZED: 'UNINITIALIZED',
+  PENDING: 'PENDING',
+  PROPOSING: 'PROPOSING',
+  COMMITTING: 'COMMITTING',
+  GRACE: 'GRACE',
+  FINALIZED: 'FINALIZED',
+  FAILED: 'FAILED',
+} as const
 
-/** Minimum fee in wei (1 GEN = 10^18 wei) */
-export const MIN_ANALYSIS_FEE_WEI = BigInt(1 * 10 ** 18);
+const CONTRACT_ADDRESS = import.meta.env.VITE_GENLAYER_CONTRACT || ''
 
-export interface MarketAnalysis {
-  sentiment: 'bullish' | 'bearish' | 'neutral';
-  confidence: number;
-  summary: string;
-  keyFactors: string[];
-  riskLevel: 'low' | 'medium' | 'high';
-  recommendedAction: string;
-  timestamp: string;
-  analyst: string;
-}
-
-export interface AnalysisRequest {
-  marketQuestion: string;
-  marketDescription: string;
-  category: string;
-  outcomeNames: string[];
-}
-
-/** Convert a JS Map (returned by readContract) to a plain object */
-function mapToObject(map: unknown): Record<string, unknown> {
-  if (!(map instanceof Map)) {
-    return map as Record<string, unknown>;
-  }
-  const obj: Record<string, unknown> = {};
-  map.forEach((value, key) => {
-    obj[key as string] = value instanceof Map ? mapToObject(value) : value;
-  });
-  return obj;
-}
-
-/**
- * Parse a u256 value returned by genlayer-js readContract.
- * genlayer-js returns primitive types directly (bigint for u256),
- * NOT wrapped in { value: bigint }.
- */
 function parseU256(raw: unknown): number {
-  if (typeof raw === 'bigint') return Number(raw);
-  if (typeof raw === 'number') return raw;
-  if (typeof raw === 'string') return Number(raw);
-  // Fallback for object-wrapped values (future SDK versions)
-  const obj = raw as { value?: bigint | number | string };
-  if (obj.value !== undefined) {
-    return typeof obj.value === 'bigint' ? Number(obj.value) : Number(obj.value);
-  }
-  return 0;
+  if (typeof raw === 'bigint') return Number(raw)
+  if (typeof raw === 'number') return raw
+  if (typeof raw === 'string') return Number(raw)
+  const obj = raw as { value?: bigint | number | string }
+  return Number(obj.value ?? 0)
 }
 
-/** Parse an AnalysisResult Map/dict into our frontend type */
-function parseAnalysisResult(raw: unknown): MarketAnalysis {
-  const obj = mapToObject(raw);
-
-  // key_factors may be an array (old contract) or a JSON string (new contract)
-  let keyFactors: string[] = [];
-  const factors = obj.key_factors;
-  if (typeof factors === 'string') {
-    try {
-      const parsed = JSON.parse(factors);
-      if (Array.isArray(parsed)) {
-        keyFactors = parsed.map(f => String(f));
-      }
-    } catch {
-      // If not valid JSON, treat as single string
-      keyFactors = [factors];
-    }
-  } else if (Array.isArray(factors)) {
-    keyFactors = factors.map(f => String(f));
+function parseJsonField(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : [raw]
+  } catch {
+    return [raw]
   }
+}
 
-  const sentiment = (obj.sentiment as string) || 'neutral';
-  const riskLevel = (obj.risk_level as string) || 'medium';
-
+function parseAnalysisResult(raw: unknown): GenLayerAnalysis {
+  const obj = raw as Record<string, unknown>
   return {
-    sentiment: (['bullish', 'bearish', 'neutral'].includes(sentiment) ? sentiment : 'neutral') as MarketAnalysis['sentiment'],
-    confidence: Number(obj.confidence) || 0,
-    summary: (obj.summary as string) || '',
-    keyFactors,
-    riskLevel: (['low', 'medium', 'high'].includes(riskLevel) ? riskLevel : 'medium') as MarketAnalysis['riskLevel'],
-    recommendedAction: (obj.recommended_action as string) || '',
-    timestamp: (obj.timestamp as string) || '',
-    analyst: (obj.analyst as string) || '',
-  };
-}
-
-export type PollProgress =
-  | { stage: 'submitted'; txHash: string }
-  | { stage: 'proposing'; elapsedSec: number }
-  | { stage: 'verifying'; elapsedSec: number }
-  | { stage: 'finalizing'; elapsedSec: number }
-  | { stage: 'completed'; elapsedSec: number }
-  | { stage: 'fetching_result'; elapsedSec: number; attempt: number };
-
-interface GenLayerTxResponse {
-  status?: string | number;
-  statusName?: string;
-  result?: unknown;
-  txExecutionResult?: number;
-  txExecutionResultName?: string;
-  data?: { result?: unknown; calldata?: unknown };
-  leaderReceipt?: { result?: unknown; calldata?: unknown };
-  calldata?: unknown;
-  execution_result?: string;
-  consensus_data?: {
-    votes?: Record<string, string>;
-    leader_receipt?: Array<{ execution_result?: string; result?: unknown }>;
-    validator_results?: Array<{ execution_result?: string; result?: unknown }>;
-  };
-}
-
-/** Check if any validator or the leader had an execution error */
-function hasExecutionError(tx: GenLayerTxResponse): boolean {
-  // SDK-native receipt fields
-  if (tx.txExecutionResultName === ExecutionResult.FINISHED_WITH_ERROR) return true;
-  if (tx.txExecutionResult === 2) return true; // FINISHED_WITH_ERROR numeric value
-
-  // Fallback for raw RPC responses
-  if (tx.execution_result === 'ERROR') return true;
-  const leaderReceipts = tx.consensus_data?.leader_receipt;
-  if (Array.isArray(leaderReceipts)) {
-    for (const r of leaderReceipts) {
-      if (r?.execution_result === 'ERROR') return true;
-    }
+    id: 0,
+    marketId: '',
+    sentiment: String(obj.sentiment || 'neutral'),
+    confidence: parseU256(obj.confidence),
+    summary: String(obj.summary || ''),
+    keyFactors: parseJsonField(String(obj.key_factors || '[]')),
+    riskLevel: String(obj.risk_level || 'medium'),
+    recommendedAction: String(obj.recommended_action || ''),
+    timestamp: String(obj.timestamp || ''),
+    txHash: '',
   }
-  const validatorResults = tx.consensus_data?.validator_results;
-  if (Array.isArray(validatorResults)) {
-    for (const r of validatorResults) {
-      if (r?.execution_result === 'ERROR') return true;
-    }
-  }
-  return false;
 }
 
-/**
- * Poll a GenLayer transaction until it reaches a decided state.
- * Uses the SDK-native waitForTransactionReceipt (same pattern as gotham-court).
- */
-export async function pollTransaction(
+function parseResolutionResult(raw: unknown, marketId: string): GenLayerResolution {
+  const obj = raw as Record<string, unknown>
+  return {
+    id: 0,
+    marketId,
+    resolvedOutcome: String(obj.resolved_outcome || ''),
+    outcomeIndex: parseU256(obj.outcome_index),
+    confidence: parseU256(obj.confidence),
+    reasoning: String(obj.reasoning || ''),
+    evidence: parseJsonField(String(obj.evidence || '[]')),
+    timestamp: String(obj.timestamp || ''),
+    txHash: '',
+    status: obj.is_finalized === true ? 'finalized' : 'resolved',
+  }
+}
+
+function parseDisputeResult(raw: unknown, marketId: string): Dispute {
+  const obj = raw as Record<string, unknown>
+  return {
+    id: 0,
+    marketId,
+    resolutionId: parseU256(obj.resolution_id),
+    challenger: String(obj.challenger || ''),
+    proposedOutcome: String(obj.proposed_outcome || ''),
+    proposedOutcomeIndex: parseU256(obj.proposed_outcome_index),
+    evidence: String(obj.evidence || ''),
+    reasoning: String(obj.reasoning || ''),
+    status: obj.is_valid === true ? 'accepted' : 'rejected',
+    timestamp: String(obj.timestamp || ''),
+    txHash: '',
+  }
+}
+
+async function pollTransaction(
+  client: ReturnType<typeof createGenLayerClient>,
   txHash: string,
-  options?: { intervalMs?: number; timeoutMs?: number; onProgress?: (p: PollProgress) => void }
-): Promise<GenLayerTxResponse> {
-  const timeoutMs = options?.timeoutMs ?? 600000; // 10 minutes
-  const onProgress = options?.onProgress;
-  const client = createGenLayerClient();
-  const start = Date.now();
-
-  onProgress?.({ stage: 'submitted', txHash });
-
-  // Keep UI updated with progress while we wait for finalization
-  const progressInterval = setInterval(() => {
-    const elapsedSec = Math.floor((Date.now() - start) / 1000);
-    if (elapsedSec < 15) {
-      onProgress?.({ stage: 'proposing', elapsedSec });
-    } else if (elapsedSec < 45) {
-      onProgress?.({ stage: 'verifying', elapsedSec });
-    } else {
-      onProgress?.({ stage: 'finalizing', elapsedSec });
-    }
-  }, 2000);
-
+  onProgress?: (stage: string) => void
+): Promise<boolean> {
   try {
-    const receipt = await Promise.race([
-      client.waitForTransactionReceipt({
-        hash: txHash as `0x${string}`,
-        status: TransactionStatus.FINALIZED,
-        interval: 3000,
-        retries: 200,
-      }) as Promise<GenLayerTxResponse>,
-      new Promise<never>((_, reject) =>
-        setTimeout(
-          () => reject(new Error('Transaction polling timed out after 10 minutes. The GenLayer network may be congested. You can check your transaction status in GenLayer Studio.')),
-          timeoutMs
-        )
-      ),
-    ]);
+    onProgress?.('proposing')
+    const receipt = await client.waitForTransactionReceipt({
+      hash: txHash,
+      status: TransactionStatus.FINALIZED,
+      interval: 3000,
+      retries: 200,
+    })
 
-    const elapsedSec = Math.floor((Date.now() - start) / 1000);
-    console.log('[GenLayer poll] Finalized after', elapsedSec, 'seconds');
-
-    if (hasExecutionError(receipt)) {
-      throw new Error(
-        'Transaction finalized but contract execution failed. ' +
-        'This usually means the contract threw an error. ' +
-        'Check GenLayer Studio for detailed validator stderr logs.'
-      );
+    if (receipt.status === 'success' || receipt.status === TransactionStatus.FINALIZED) {
+      onProgress?.('completed')
+      return true
     }
-
-    onProgress?.({ stage: 'completed', elapsedSec });
-    return receipt;
-  } finally {
-    clearInterval(progressInterval);
+    return false
+  } catch {
+    return false
   }
 }
 
-/**
- * Call the GenLayer MarketAnalyzer contract to perform AI analysis.
- *
- * Strategy: read analysis count before tx, submit, poll for finalization,
- * then read get_analysis(count+1) with retries since state may need a moment
- * to propagate after finalization.
- */
 export async function analyzeMarket(
-  request: AnalysisRequest,
-  feeWei: bigint,
-  address: string,
-  onProgress?: (p: PollProgress) => void
-): Promise<MarketAnalysis> {
-  if (!GENLAYER_CONTRACT_ADDRESS || GENLAYER_CONTRACT_ADDRESS === '0x0000000000000000000000000000000000000000') {
-    throw new Error(
-      'GenLayer contract address not configured. ' +
-      'Set VITE_GENLAYER_ANALYSIS_CONTRACT in your .env file after deploying the contract.'
-    );
-  }
+  question: string,
+  description: string,
+  outcomes: string[],
+  feeGen: number,
+  onProgress?: (stage: string) => void
+): Promise<GenLayerAnalysis | null> {
+  if (!CONTRACT_ADDRESS) throw new Error('GenLayer contract address not configured')
 
-  if (feeWei < MIN_ANALYSIS_FEE_WEI) {
-    throw new Error(`Minimum fee is 1 GEN (${MIN_ANALYSIS_FEE_WEI.toString()} wei)`);
-  }
+  await switchToGenLayerNetwork()
 
-  const client = createGenLayerClient(address);
+  const client = createGenLayerClient()
+  const feeWei = BigInt(Math.floor(feeGen * 1e18))
 
-  // 1. Read current analysis count BEFORE submitting
-  console.log('[GenLayer] Reading analysis count before tx...');
-  const countBefore = await client.readContract({
-    address: GENLAYER_CONTRACT_ADDRESS as `0x${string}`,
-    functionName: 'get_analysis_count',
-    args: [],
-  });
-  const countBeforeNum = parseU256(countBefore);
-  console.log('[GenLayer] Count before:', countBeforeNum);
+  onProgress?.('submitted')
 
-  // 2. Submit the analysis transaction (sends native GEN)
-  console.log('[GenLayer] Submitting analyze_market tx...');
   const txHash = await client.writeContract({
-    address: GENLAYER_CONTRACT_ADDRESS as `0x${string}`,
+    address: CONTRACT_ADDRESS,
     functionName: 'analyze_market',
-    args: [
-      request.marketQuestion,
-      request.marketDescription,
-      request.outcomeNames,
-    ],
+    args: [question, description, outcomes],
     value: feeWei,
-  });
-  console.log('[GenLayer] Tx submitted:', txHash);
+  })
 
-  // 3. Poll for transaction completion
-  console.log('[GenLayer] Polling for finalization...');
-  await pollTransaction(txHash, { onProgress });
-  console.log('[GenLayer] Tx finalized.');
+  const success = await pollTransaction(client, txHash, onProgress)
+  if (!success) throw new Error('Analysis transaction failed or timed out')
 
-  // 4. Determine which analysis ID to read.
-  //    The contract stores analyses sequentially. After finalization, read the
-  //    post-tx count to know exactly which slot was just written.
-  console.log('[GenLayer] Reading post-tx analysis count...');
-  let countAfterNum: number;
-  try {
-    const countAfter = await client.readContract({
-      address: GENLAYER_CONTRACT_ADDRESS as `0x${string}`,
+  onProgress?.('fetching_result')
+
+  const countAfter = parseU256(
+    await client.readContract({
+      address: CONTRACT_ADDRESS,
       functionName: 'get_analysis_count',
       args: [],
-    });
-    countAfterNum = parseU256(countAfter);
-    console.log('[GenLayer] Count after:', countAfterNum);
-  } catch {
-    countAfterNum = countBeforeNum + 1;
-    console.log('[GenLayer] Failed to read post-tx count, assuming:', countAfterNum);
-  }
+    })
+  )
 
-  // Try multiple candidate IDs in order of likelihood.
-  // The contract stores at index `analysis_count` (0-based) then increments.
-  // get_analysis(N) likely returns the Nth stored item. We try the most
-  // probable IDs and pick the first one with a non-empty sentiment.
-  const candidateIds = Array.from(new Set([
-    countAfterNum,          // Most likely: count after tx = next free slot
-    countAfterNum - 1,      // Fallback: last stored slot
-    countBeforeNum + 1,     // Legacy fallback
-    countBeforeNum,         // Edge case
-  ])).filter(id => id > 0);
-
-  console.log('[GenLayer] Candidate analysis IDs:', candidateIds);
-
-  const maxRetries = 5;
-  const retryDelayMs = 2000;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    onProgress?.({ stage: 'fetching_result', elapsedSec: 0, attempt });
-
-    for (const id of candidateIds) {
-      try {
-        console.log(`[GenLayer] Trying get_analysis(${id})...`);
-        const result = await client.readContract({
-          address: GENLAYER_CONTRACT_ADDRESS as `0x${string}`,
-          functionName: 'get_analysis',
-          args: [BigInt(id)],
-        });
-
-        console.log('[GenLayer] get_analysis raw result:', result);
-        const parsed = parseAnalysisResult(result);
-        console.log('[GenLayer] Parsed:', parsed);
-
-        // Sanity check: if sentiment is empty, this ID might be stale/empty
-        if (parsed.sentiment && parsed.sentiment !== 'neutral') {
-          console.log(`[GenLayer] Analysis ID ${id} looks valid. Returning.`);
-          return parsed;
-        }
-
-        // Even if sentiment is neutral, if we have a summary that's non-trivial, accept it
-        if (parsed.summary && parsed.summary.length > 10) {
-          console.log(`[GenLayer] Analysis ID ${id} has content. Returning.`);
-          return parsed;
-        }
-
-        console.log(`[GenLayer] Analysis ID ${id} seems empty, trying next candidate...`);
-      } catch (err) {
-        console.warn(`[GenLayer] get_analysis(${id}) failed:`, err instanceof Error ? err.message : String(err));
+  for (let i = countAfter; i >= Math.max(1, countAfter - 3); i--) {
+    try {
+      const raw = await client.readContract({
+        address: CONTRACT_ADDRESS,
+        functionName: 'get_analysis',
+        args: [BigInt(i)],
+      })
+      const parsed = parseAnalysisResult(raw)
+      if (parsed.sentiment && parsed.sentiment !== 'neutral') {
+        parsed.id = i
+        parsed.txHash = txHash
+        return parsed
       }
-    }
-
-    if (attempt < maxRetries) {
-      console.log(`[GenLayer] All candidates empty on attempt ${attempt}, retrying in ${retryDelayMs}ms...`);
-      await new Promise(r => setTimeout(r, retryDelayMs));
+      if (parsed.summary && parsed.summary.length > 10) {
+        parsed.id = i
+        parsed.txHash = txHash
+        return parsed
+      }
+    } catch {
+      continue
     }
   }
 
-  throw new Error(
-    `Failed to fetch a valid analysis result after ${maxRetries} attempts. ` +
-    `Tried IDs: ${candidateIds.join(', ')}. ` +
-    `The transaction finalized successfully but the stored analysis appears empty or unreadable. ` +
-    `Check GenLayer Studio to verify the contract state.`
-  );
+  throw new Error('Analysis completed but result could not be retrieved')
 }
 
-/**
- * Get the current minimum fee from the contract.
- */
-export async function getMinFee(): Promise<bigint> {
-  if (!GENLAYER_CONTRACT_ADDRESS) return MIN_ANALYSIS_FEE_WEI;
+export async function resolveMarket(
+  marketId: string,
+  question: string,
+  description: string,
+  outcomes: string[],
+  feeGen: number,
+  onProgress?: (stage: string) => void
+): Promise<GenLayerResolution | null> {
+  if (!CONTRACT_ADDRESS) throw new Error('GenLayer contract address not configured')
 
-  const client = createGenLayerClient();
-  const result = await client.readContract({
-    address: GENLAYER_CONTRACT_ADDRESS as `0x${string}`,
-    functionName: 'get_min_fee',
-    args: [],
-  });
+  await switchToGenLayerNetwork()
 
-  return BigInt(parseU256(result) || MIN_ANALYSIS_FEE_WEI);
+  const client = createGenLayerClient()
+  const feeWei = BigInt(Math.floor(feeGen * 1e18))
+
+  onProgress?.('submitted')
+
+  const txHash = await client.writeContract({
+    address: CONTRACT_ADDRESS,
+    functionName: 'resolve_market',
+    args: [marketId, question, description, outcomes],
+    value: feeWei,
+  })
+
+  const success = await pollTransaction(client, txHash, onProgress)
+  if (!success) throw new Error('Resolution transaction failed or timed out')
+
+  onProgress?.('fetching_result')
+
+  const countAfter = parseU256(
+    await client.readContract({
+      address: CONTRACT_ADDRESS,
+      functionName: 'get_resolution_count',
+      args: [],
+    })
+  )
+
+  for (let i = countAfter; i >= Math.max(1, countAfter - 3); i--) {
+    try {
+      const raw = await client.readContract({
+        address: CONTRACT_ADDRESS,
+        functionName: 'get_resolution',
+        args: [BigInt(i)],
+      })
+      const parsed = parseResolutionResult(raw, marketId)
+      if (parsed.resolvedOutcome && parsed.resolvedOutcome.length > 0) {
+        parsed.id = i
+        parsed.txHash = txHash
+        return parsed
+      }
+    } catch {
+      continue
+    }
+  }
+
+  throw new Error('Resolution completed but result could not be retrieved')
 }
 
-/**
- * Get the total number of analyses performed by the contract.
- */
-export async function getAnalysisCount(): Promise<number> {
-  if (!GENLAYER_CONTRACT_ADDRESS) return 0;
+export async function disputeResolution(
+  resolutionId: number,
+  marketId: string,
+  outcomes: string[],
+  feeGen: number,
+  onProgress?: (stage: string) => void
+): Promise<Dispute | null> {
+  if (!CONTRACT_ADDRESS) throw new Error('GenLayer contract address not configured')
 
-  const client = createGenLayerClient();
-  const result = await client.readContract({
-    address: GENLAYER_CONTRACT_ADDRESS as `0x${string}`,
-    functionName: 'get_analysis_count',
-    args: [],
-  });
+  await switchToGenLayerNetwork()
 
-  return parseU256(result);
+  const client = createGenLayerClient()
+  const feeWei = BigInt(Math.floor(feeGen * 1e18))
+
+  onProgress?.('submitted')
+
+  const txHash = await client.writeContract({
+    address: CONTRACT_ADDRESS,
+    functionName: 'dispute_resolution',
+    args: [BigInt(resolutionId), marketId, outcomes],
+    value: feeWei,
+  })
+
+  const success = await pollTransaction(client, txHash, onProgress)
+  if (!success) throw new Error('Dispute transaction failed or timed out')
+
+  onProgress?.('fetching_result')
+
+  const countAfter = parseU256(
+    await client.readContract({
+      address: CONTRACT_ADDRESS,
+      functionName: 'get_dispute_count',
+      args: [],
+    })
+  )
+
+  for (let i = countAfter; i >= Math.max(1, countAfter - 3); i--) {
+    try {
+      const raw = await client.readContract({
+        address: CONTRACT_ADDRESS,
+        functionName: 'get_dispute',
+        args: [BigInt(i)],
+      })
+      const parsed = parseDisputeResult(raw, marketId)
+      if (parsed.proposedOutcome && parsed.proposedOutcome.length > 0) {
+        parsed.id = i
+        parsed.txHash = txHash
+        return parsed
+      }
+    } catch {
+      continue
+    }
+  }
+
+  throw new Error('Dispute completed but result could not be retrieved')
 }
 
-/**
- * Get a specific analysis by ID.
- */
-export async function getAnalysis(analysisId: number): Promise<MarketAnalysis | null> {
-  if (!GENLAYER_CONTRACT_ADDRESS) return null;
+export async function getAnalysis(_marketId: string): Promise<GenLayerAnalysis | null> {
+  if (!CONTRACT_ADDRESS) return null
 
-  const client = createGenLayerClient();
+  const client = createGenLayerClient()
+  const count = parseU256(
+    await client.readContract({
+      address: CONTRACT_ADDRESS,
+      functionName: 'get_analysis_count',
+      args: [],
+    })
+  )
+
+  for (let i = count; i >= Math.max(1, count - 10); i--) {
+    try {
+      const raw = await client.readContract({
+        address: CONTRACT_ADDRESS,
+        functionName: 'get_analysis',
+        args: [BigInt(i)],
+      })
+      const parsed = parseAnalysisResult(raw)
+      parsed.id = i
+      if (parsed.summary && parsed.summary.length > 10) {
+        return parsed
+      }
+    } catch {
+      continue
+    }
+  }
+
+  return null
+}
+
+export async function getResolution(marketId: string): Promise<GenLayerResolution | null> {
+  if (!CONTRACT_ADDRESS) return null
+
+  const client = createGenLayerClient()
+
   try {
-    const result = await client.readContract({
-      address: GENLAYER_CONTRACT_ADDRESS as `0x${string}`,
-      functionName: 'get_analysis',
-      args: [BigInt(analysisId)],
-    });
-    return parseAnalysisResult(result);
+    const raw = await client.readContract({
+      address: CONTRACT_ADDRESS,
+      functionName: 'get_resolution_by_market',
+      args: [marketId],
+    })
+
+    if (!raw) return null
+
+    const parsed = parseResolutionResult(raw, marketId)
+    return parsed
   } catch {
-    return null;
+    return null
   }
 }
+
+export async function getMinFees(): Promise<{ analysis: number; resolution: number; dispute: number }> {
+  if (!CONTRACT_ADDRESS) {
+    return { analysis: 1, resolution: 2, dispute: 0.5 }
+  }
+
+  const client = createGenLayerClient()
+
+  const [analysisRaw, resolutionRaw, disputeRaw] = await Promise.all([
+    client.readContract({
+      address: CONTRACT_ADDRESS,
+      functionName: 'get_min_analysis_fee',
+      args: [],
+    }),
+    client.readContract({
+      address: CONTRACT_ADDRESS,
+      functionName: 'get_min_resolution_fee',
+      args: [],
+    }),
+    client.readContract({
+      address: CONTRACT_ADDRESS,
+      functionName: 'get_min_dispute_fee',
+      args: [],
+    }),
+  ])
+
+  return {
+    analysis: parseU256(analysisRaw) / 1e18,
+    resolution: parseU256(resolutionRaw) / 1e18,
+    dispute: parseU256(disputeRaw) / 1e18,
+  }
+}
+
+export { switchToGenLayerNetwork, switchToBSC }

@@ -1,91 +1,174 @@
-import { useState, useCallback } from 'react';
-import { analyzeMarket, getMinFee, MIN_ANALYSIS_FEE_WEI, type MarketAnalysis, type AnalysisRequest, type PollProgress } from '../services/genlayer';
+import { useState, useCallback } from 'react'
+import {
+  analyzeMarket,
+  resolveMarket,
+  disputeResolution,
+  getMinFees,
+} from '../services/genlayer'
+import type { GenLayerAnalysis, GenLayerResolution, Dispute } from '../types/market'
 
-interface UseGenLayerAnalysisReturn {
-  analysis: MarketAnalysis | null;
-  loading: boolean;
-  error: string | null;
-  txStatus: string | null;
-  progress: PollProgress | null;
-  minFee: bigint;
-  analyze: (request: AnalysisRequest, feeGen: string, address: string) => Promise<void>;
-  reset: () => void;
-  fetchMinFee: () => Promise<void>;
+interface UseGenLayerReturn {
+  analysis: GenLayerAnalysis | null
+  resolution: GenLayerResolution | null
+  disputeResult: Dispute | null
+  loading: boolean
+  error: string | null
+  txStatus: string | null
+  minFees: { analysis: number; resolution: number; dispute: number }
+  analyze: (question: string, description: string, outcomes: string[], feeGen?: number) => Promise<GenLayerAnalysis | null>
+  resolve: (marketId: string, question: string, description: string, outcomes: string[], feeGen?: number) => Promise<GenLayerResolution | null>
+  submitDispute: (resolutionId: number, marketId: string, outcomes: string[], feeGen?: number) => Promise<Dispute | null>
+  reset: () => void
+  fetchMinFees: () => Promise<void>
 }
 
-export function useGenLayerAnalysis(): UseGenLayerAnalysisReturn {
-  const [analysis, setAnalysis] = useState<MarketAnalysis | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [txStatus, setTxStatus] = useState<string | null>(null);
-  const [progress, setProgress] = useState<PollProgress | null>(null);
-  const [minFee, setMinFee] = useState<bigint>(MIN_ANALYSIS_FEE_WEI);
+export function useGenLayer(): UseGenLayerReturn {
+  const [analysis, setAnalysis] = useState<GenLayerAnalysis | null>(null)
+  const [resolution, setResolution] = useState<GenLayerResolution | null>(null)
+  const [disputeResult, setDisputeResult] = useState<Dispute | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [txStatus, setTxStatus] = useState<string | null>(null)
+  const [minFees, setMinFees] = useState({ analysis: 1, resolution: 2, dispute: 0.5 })
 
-  const fetchMinFee = useCallback(async () => {
+  const fetchMinFees = useCallback(async () => {
     try {
-      const fee = await getMinFee();
-      setMinFee(fee);
+      const fees = await getMinFees()
+      setMinFees(fees)
     } catch (err) {
-      console.error('Failed to fetch min fee:', err);
-      setMinFee(MIN_ANALYSIS_FEE_WEI);
+      console.error('Failed to fetch min fees:', err)
     }
-  }, []);
+  }, [])
 
-  const analyze = useCallback(async (request: AnalysisRequest, feeGen: string, address: string) => {
-    setLoading(true);
-    setError(null);
-    setAnalysis(null);
-    setTxStatus('Submitting...');
-    setProgress(null);
+  const analyze = useCallback(
+    async (question: string, description: string, outcomes: string[], feeGen?: number) => {
+      setLoading(true)
+      setError(null)
+      setAnalysis(null)
+      setTxStatus('Submitting analysis...')
 
-    try {
-      const feeNum = parseFloat(feeGen);
-      if (isNaN(feeNum) || feeNum <= 0) {
-        throw new Error('Invalid GEN amount');
+      try {
+        const fee = feeGen || minFees.analysis
+        const result = await analyzeMarket(question, description, outcomes, fee, (stage) => {
+          const statusMap: Record<string, string> = {
+            submitted: 'Submitted to GenLayer validators',
+            proposing: 'Leader validator proposing result',
+            verifying: 'Consensus validators verifying',
+            finalizing: 'Finalizing on-chain',
+            completed: 'Result finalized on-chain',
+            fetching_result: 'Fetching result from contract...',
+          }
+          setTxStatus(statusMap[stage] || stage)
+        })
+
+        setAnalysis(result)
+        setTxStatus('Analysis finalized')
+        return result
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Analysis failed'
+        setError(message)
+        setTxStatus('Failed')
+        throw err
+      } finally {
+        setLoading(false)
       }
-      const feeWei = BigInt(Math.floor(feeNum * 10 ** 18));
+    },
+    [minFees.analysis]
+  )
 
-      const result = await analyzeMarket(request, feeWei, address, (p) => {
-        setProgress(p);
-        const elapsed = 'elapsedSec' in p ? ` (${p.elapsedSec}s)` : '';
-        if (p.stage === 'submitted') setTxStatus('Submitted to GenLayer validators' + elapsed);
-        else if (p.stage === 'proposing') setTxStatus('Leader validator proposing result' + elapsed);
-        else if (p.stage === 'verifying') setTxStatus('Consensus validators verifying' + elapsed);
-        else if (p.stage === 'finalizing') setTxStatus('Finalizing on-chain' + elapsed);
-        else if (p.stage === 'completed') setTxStatus('Result finalized on-chain' + elapsed);
-        else if (p.stage === 'fetching_result') setTxStatus(`Fetching result from contract (attempt ${p.attempt})...`);
-      });
+  const resolve = useCallback(
+    async (marketId: string, question: string, description: string, outcomes: string[], feeGen?: number) => {
+      setLoading(true)
+      setError(null)
+      setResolution(null)
+      setTxStatus('Submitting resolution...')
 
-      setAnalysis(result);
-      setTxStatus('Finalized');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'GenLayer analysis failed';
-      setError(message);
-      setTxStatus('Failed');
-      console.error('GenLayer analysis error:', err);
-      throw err;
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+      try {
+        const fee = feeGen || minFees.resolution
+        const result = await resolveMarket(marketId, question, description, outcomes, fee, (stage) => {
+          const statusMap: Record<string, string> = {
+            submitted: 'Submitted resolution to GenLayer',
+            proposing: 'Leader resolver evaluating evidence',
+            verifying: 'Consensus validators verifying resolution',
+            finalizing: 'Finalizing resolution on-chain',
+            completed: 'Resolution finalized on-chain',
+            fetching_result: 'Fetching resolution from contract...',
+          }
+          setTxStatus(statusMap[stage] || stage)
+        })
+
+        setResolution(result)
+        setTxStatus('Resolution finalized')
+        return result
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Resolution failed'
+        setError(message)
+        setTxStatus('Failed')
+        throw err
+      } finally {
+        setLoading(false)
+      }
+    },
+    [minFees.resolution]
+  )
+
+  const submitDispute = useCallback(
+    async (resolutionId: number, marketId: string, outcomes: string[], feeGen?: number) => {
+      setLoading(true)
+      setError(null)
+      setDisputeResult(null)
+      setTxStatus('Submitting dispute...')
+
+      try {
+        const fee = feeGen || minFees.dispute
+        const result = await disputeResolution(resolutionId, marketId, outcomes, fee, (stage) => {
+          const statusMap: Record<string, string> = {
+            submitted: 'Submitted dispute to GenLayer',
+            proposing: 'AI reviewing dispute evidence',
+            verifying: 'Consensus validators verifying judgment',
+            finalizing: 'Finalizing dispute outcome on-chain',
+            completed: 'Dispute resolved on-chain',
+            fetching_result: 'Fetching dispute result from contract...',
+          }
+          setTxStatus(statusMap[stage] || stage)
+        })
+
+        setDisputeResult(result)
+        setTxStatus('Dispute resolved')
+        return result
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Dispute failed'
+        setError(message)
+        setTxStatus('Failed')
+        throw err
+      } finally {
+        setLoading(false)
+      }
+    },
+    [minFees.dispute]
+  )
 
   const reset = useCallback(() => {
-    setAnalysis(null);
-    setError(null);
-    setLoading(false);
-    setTxStatus(null);
-    setProgress(null);
-  }, []);
+    setAnalysis(null)
+    setResolution(null)
+    setDisputeResult(null)
+    setError(null)
+    setLoading(false)
+    setTxStatus(null)
+  }, [])
 
   return {
     analysis,
+    resolution,
+    disputeResult,
     loading,
     error,
     txStatus,
-    progress,
-    minFee,
+    minFees,
     analyze,
+    resolve,
+    submitDispute,
     reset,
-    fetchMinFee,
-  };
+    fetchMinFees,
+  }
 }

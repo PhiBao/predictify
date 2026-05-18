@@ -1,225 +1,187 @@
-import { useState, useEffect, useMemo } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { useAccount } from 'wagmi';
-import { predictAPI } from '../services/predictAPI';
-import { useGenLayerAnalysis } from '../hooks/useGenLayer';
-import { useToast } from '../contexts/ToastContext';
-import { usePredictSDK } from '../hooks/usePredictSDK';
-import { useNetworkState } from '../hooks/useNetworkState';
-import { TradeModal } from './TradeModal';
-import type { Market, Outcome } from '../types/predict';
-import { formatPriceLevel } from '../types/predict';
+import { useState, useEffect, useMemo } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
+import { useAccount } from 'wagmi'
+import { getMarketsByGroupSlug } from '../services/polymarketAPI'
+import { getMarketsByGroupSlug as getSupabaseGroupMarkets } from '../services/supabase'
+import { useGenLayer } from '../hooks/useGenLayer'
+import { useToast } from '../contexts/ToastContext'
+import { useNetworkState } from '../hooks/useNetworkState'
+import type { PolymarketMarket } from '../types/market'
+import { formatPriceLevel, formatVolume } from '../types/market'
 
-const SENTIMENT_CONFIG = {
+const SENTIMENT_CONFIG: Record<string, { label: string; color: string; icon: string }> = {
   bullish: { label: 'Bullish', color: '#34c759', icon: '▲' },
   bearish: { label: 'Bearish', color: '#ff3b30', icon: '▼' },
   neutral: { label: 'Neutral', color: '#ff9500', icon: '◆' },
-};
+}
 
-const RISK_CONFIG = {
+const RISK_CONFIG: Record<string, { label: string; color: string }> = {
   low: { label: 'Low Risk', color: '#34c759' },
   medium: { label: 'Medium Risk', color: '#ff9500' },
   high: { label: 'High Risk', color: '#ff3b30' },
-};
-
-function renderMarkdown(text: string): string {
-  let html = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/\n/g, '<br>');
-  return html;
+  extreme: { label: 'Extreme Risk', color: '#ff2d55' },
 }
 
-/** Convert a slug like "number-of-cz-tweets" to "Number Of Cz Tweets" */
-function unsanitizeSlug(slug: string): string {
-  return slug
-    .replace(/-/g, ' ')
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+function renderMarkdown(text: string): string {
+  let html = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  html = html.replace(/\n/g, '<br>')
+  return html
 }
 
 export function MarketGroupDetail() {
-  const { categorySlug } = useParams<{ categorySlug: string }>();
-  const navigate = useNavigate();
-  const { address, isConnected } = useAccount();
-  const network = useNetworkState();
-  const { isReady } = usePredictSDK();
-  const { showToast } = useToast();
+  const { slug } = useParams<{ slug: string }>()
+  const navigate = useNavigate()
+  const { address, isConnected } = useAccount()
+  const network = useNetworkState()
+  const { showToast } = useToast()
 
-  const [groupMarkets, setGroupMarkets] = useState<Market[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const [tradeMarket, setTradeMarket] = useState<Market | null>(null);
-  const [tradeOutcome, setTradeOutcome] = useState<Outcome | null>(null);
-  const [showTradeModal, setShowTradeModal] = useState(false);
+  const [groupMarkets, setGroupMarkets] = useState<PolymarketMarket[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const {
     analysis,
-    loading: analyzing,
-    error: analysisError,
+    loading: genLayerLoading,
+    error: genLayerError,
     txStatus,
-    progress,
-    minFee,
+    minFees,
     analyze,
-    reset: resetAnalysis,
-    fetchMinFee,
-  } = useGenLayerAnalysis();
+    reset: resetGenLayer,
+    fetchMinFees,
+  } = useGenLayer()
 
-  const [genAmount, setGenAmount] = useState('1.0');
-  const [analysisStep, setAnalysisStep] = useState<'input' | 'processing' | 'result'>('input');
-
-  useEffect(() => {
-    fetchMinFee();
-  }, [fetchMinFee]);
+  const [genAmount, setGenAmount] = useState('1.0')
+  const [analysisStep, setAnalysisStep] = useState<'input' | 'processing' | 'result'>('input')
 
   useEffect(() => {
-    let cancelled = false;
+    fetchMinFees()
+  }, [fetchMinFees])
+
+  useEffect(() => {
+    let cancelled = false
 
     async function fetchGroup() {
-      if (!categorySlug) return;
+      if (!slug) return
       try {
-        setLoading(true);
-        setError(null);
+        setLoading(true)
+        setError(null)
 
-        const decodedSlug = decodeURIComponent(categorySlug).trim();
+        const decodedSlug = decodeURIComponent(slug).trim()
+        let marketsData: PolymarketMarket[] = []
 
-        // Try API category filter first, then fall back to full list
-        let marketsData: Market[] = [];
         try {
-          const filteredData = await predictAPI.getMarkets({ category: decodedSlug, limit: 200 });
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const raw = filteredData as any;
-          marketsData = Array.isArray(raw.data) ? raw.data : [];
+          const cached = await getSupabaseGroupMarkets(decodedSlug)
+          if (cached.length > 0) {
+            marketsData = cached.map((row) => ({
+              id: row.id,
+              conditionId: row.condition_id,
+              question: row.question,
+              description: row.description,
+              slug: row.slug,
+              category: row.category,
+              tags: row.tags,
+              outcomes: row.outcomes,
+              outcomePrices: row.outcome_prices,
+              probabilities: row.probabilities,
+              volume: row.volume,
+              volume24h: row.volume_24h,
+              liquidity: row.liquidity,
+              status: row.status,
+              closeDate: row.close_date,
+              endDate: row.end_date,
+              image: row.image,
+              icon: row.icon,
+              resolutionSource: row.resolution_source,
+              groupSlug: row.group_slug || undefined,
+              groupName: row.group_name || undefined,
+            }))
+          }
         } catch {
-          // API category filter may not be supported; fall through
+          // fall through to live fetch
         }
 
-        // If API filter returned nothing, fetch all and filter client-side
         if (marketsData.length === 0) {
-          const allData = await predictAPI.getMarkets({ limit: 500 });
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const raw = allData as any;
-          const allMarkets: Market[] = Array.isArray(raw.data) ? raw.data : [];
-          const slugLower = decodedSlug.toLowerCase();
-          marketsData = allMarkets.filter((m) =>
-            m.categorySlug?.trim().toLowerCase() === slugLower
-          );
+          marketsData = await getMarketsByGroupSlug(decodedSlug)
         }
 
-        if (cancelled) return;
+        if (cancelled) return
 
         if (marketsData.length === 0) {
-          setError('No markets found for this group.');
+          setError('No markets found for this group.')
         } else {
-          setGroupMarkets(marketsData);
+          setGroupMarkets(marketsData)
         }
       } catch (err) {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : 'Failed to load markets');
+        if (cancelled) return
+        setError(err instanceof Error ? err.message : 'Failed to load markets')
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setLoading(false)
       }
     }
 
-    fetchGroup();
-    return () => { cancelled = true; };
-  }, [categorySlug]);
+    fetchGroup()
+    return () => { cancelled = true }
+  }, [slug])
 
-  const firstMarket = groupMarkets[0];
+  const firstMarket = groupMarkets[0]
 
   const displayTitle = useMemo(() => {
-    if (!firstMarket) return '';
-    const allSameQuestion = groupMarkets.every((m) => m.question === firstMarket.question);
-    if (allSameQuestion && firstMarket.question && firstMarket.question !== firstMarket.categorySlug) {
-      return firstMarket.question;
-    }
-    return unsanitizeSlug(firstMarket.categorySlug);
-  }, [firstMarket, groupMarkets]);
-
-  const handleTrade = async (market: Market, outcome: Outcome) => {
-    if (!isConnected) {
-      showToast('Connect your wallet to trade', 'warning');
-      return;
-    }
-
-    // Auto-switch to BNB Chain if currently on GenLayer
-    if (network.current === 'genlayer') {
-      showToast('Switching to BNB Chain...', 'info');
-      try {
-        await network.switchToBSC();
-      } catch (err) {
-        showToast(err instanceof Error ? err.message : 'Network switch failed', 'error');
-        return;
-      }
-    }
-
-    if (!isReady) {
-      showToast('SDK initializing. Please wait a moment.', 'warning');
-      return;
-    }
-
-    setTradeMarket(market);
-    setTradeOutcome(outcome);
-    setShowTradeModal(true);
-  };
+    if (!firstMarket) return ''
+    if (firstMarket.groupName) return firstMarket.groupName
+    return firstMarket.question
+  }, [firstMarket])
 
   const handleAnalyze = async () => {
     if (!isConnected || !address || !firstMarket) {
-      showToast('Please connect your wallet first', 'warning');
-      return;
+      showToast('Please connect your wallet first', 'warning')
+      return
     }
 
-    const genAmountNum = parseFloat(genAmount) || 0;
+    const genAmountNum = parseFloat(genAmount) || 0
     if (genAmountNum <= 0) {
-      showToast('Please enter a valid GEN amount', 'warning');
-      return;
+      showToast('Please enter a valid GEN amount', 'warning')
+      return
     }
 
-    const minFeeGen = Number(minFee) / 10 ** 18;
-    if (genAmountNum < minFeeGen) {
-      showToast(`Minimum fee is ${minFeeGen} GEN`, 'warning');
-      return;
+    if (genAmountNum < minFees.analysis) {
+      showToast(`Minimum fee is ${minFees.analysis} GEN`, 'warning')
+      return
     }
 
     if (network.current !== 'genlayer') {
-      showToast('Please switch to GenLayer network first', 'warning');
-      return;
+      showToast('Please switch to GenLayer network first', 'warning')
+      return
     }
 
-    setAnalysisStep('processing');
+    setAnalysisStep('processing')
 
     const allOutcomeNames = Array.from(
-      new Set(groupMarkets.flatMap((m) => m.outcomes.map((o) => o.name)))
-    );
+      new Set(groupMarkets.flatMap((m) => m.outcomes))
+    )
 
     try {
-      await analyze({
-        marketQuestion: displayTitle,
-        marketDescription: firstMarket.description,
-        category: firstMarket.categorySlug,
-        outcomeNames: allOutcomeNames,
-      }, genAmount, address);
-
-      setAnalysisStep('result');
-      showToast('GenLayer analysis complete!', 'success');
+      await analyze(displayTitle, firstMarket.description, allOutcomeNames, genAmountNum)
+      setAnalysisStep('result')
+      showToast('GenLayer analysis complete!', 'success')
     } catch {
-      setAnalysisStep('input');
-      showToast('Analysis failed. Check error details.', 'error');
+      setAnalysisStep('input')
+      showToast('Analysis failed. Check error details.', 'error')
     }
-  };
+  }
 
   const handleResetAnalysis = () => {
-    resetAnalysis();
-    setAnalysisStep('input');
-  };
+    resetGenLayer()
+    setAnalysisStep('input')
+  }
 
-  const sentiment = analysis ? SENTIMENT_CONFIG[analysis.sentiment] : null;
-  const risk = analysis ? RISK_CONFIG[analysis.riskLevel] : null;
-  const minFeeGen = Number(minFee) / 10 ** 18;
+  const sentiment = analysis ? SENTIMENT_CONFIG[analysis.sentiment] : null
+  const risk = analysis ? RISK_CONFIG[analysis.riskLevel || 'medium'] : null
 
   const descriptionHtml = useMemo(() => {
-    if (!firstMarket?.description) return '';
-    return renderMarkdown(firstMarket.description);
-  }, [firstMarket?.description]);
+    if (!firstMarket?.description) return ''
+    return renderMarkdown(firstMarket.description)
+  }, [firstMarket?.description])
 
   if (loading) {
     return (
@@ -227,7 +189,7 @@ export function MarketGroupDetail() {
         <div className="loading-spinner"></div>
         <p>Loading market group...</p>
       </div>
-    );
+    )
   }
 
   if (error || !firstMarket) {
@@ -239,10 +201,8 @@ export function MarketGroupDetail() {
           Back to Markets
         </button>
       </div>
-    );
+    )
   }
-
-  const statusClass = firstMarket.status?.toLowerCase() || 'open';
 
   return (
     <div className="market-detail">
@@ -253,23 +213,21 @@ export function MarketGroupDetail() {
           </button>
 
           <div className="market-detail-header">
-            {firstMarket.imageUrl && (
+            {firstMarket.image && (
               <div className="market-detail-image">
-                <img src={firstMarket.imageUrl} alt={displayTitle} />
+                <img src={firstMarket.image} alt={displayTitle} />
               </div>
             )}
             <div className="market-detail-info">
               <div className="market-detail-badges">
-                <span className={`market-status-badge ${statusClass}`}>
-                  {firstMarket.status || 'OPEN'}
+                <span className={`market-status-badge ${firstMarket.status}`}>
+                  {firstMarket.status.toUpperCase()}
                 </span>
-                <span className="market-detail-category">{firstMarket.categorySlug}</span>
+                <span className="market-detail-category">{firstMarket.category}</span>
               </div>
               <h1 className="market-detail-title">{displayTitle}</h1>
               <div className="market-detail-meta">
-                <span>Fee: {(firstMarket.feeRateBps / 100).toFixed(2)}%</span>
-                {firstMarket.isYieldBearing && <span className="meta-tag">Yield Bearing</span>}
-                {firstMarket.isNegRisk && <span className="meta-tag">Neg Risk</span>}
+                <span>Volume: {formatVolume(firstMarket.volume)}</span>
                 <span className="meta-tag">{groupMarkets.length} Markets</span>
               </div>
             </div>
@@ -285,67 +243,44 @@ export function MarketGroupDetail() {
             </div>
           )}
 
-          {/* Grouped Markets */}
           <div className="market-detail-outcomes">
             <h3>Markets</h3>
             <div className="market-group-rows">
               {groupMarkets.map((market) => (
                 <div key={market.id} className="market-group-row">
-                  <div className="market-group-row-title">{market.title}</div>
+                  <div className="market-group-row-title">{market.question}</div>
                   <div className="outcomes-grid">
-                    {market.outcomes.map((outcome) => (
-                      <div key={outcome.onChainId} className="outcome-card">
-                        <div className="outcome-card-header">
-                          <span className="outcome-card-name">{outcome.name}</span>
-                          {outcome.status && (
-                            <span className="outcome-card-status">{outcome.status}</span>
-                          )}
+                    {market.outcomes.map((outcome, idx) => {
+                      const probability = market.probabilities[idx] || 0
+                      return (
+                        <div key={outcome} className="outcome-card">
+                          <div className="outcome-card-header">
+                            <span className="outcome-card-name">{outcome}</span>
+                          </div>
+                          <div className="outcome-card-prices">
+                            <span className="outcome-price probability">
+                              {formatPriceLevel(probability)}
+                            </span>
+                          </div>
+                          <div className="outcome-probability-bar">
+                            <div
+                              className="outcome-probability-fill"
+                              style={{ width: `${probability * 100}%` }}
+                            />
+                          </div>
                         </div>
-                        <div className="outcome-card-prices">
-                          {outcome.bestBid && (
-                            <span className="outcome-price bid">Bid: {formatPriceLevel(outcome.bestBid)}</span>
-                          )}
-                          {outcome.bestAsk && (
-                            <span className="outcome-price ask">Ask: {formatPriceLevel(outcome.bestAsk)}</span>
-                          )}
-                        </div>
-                        <button
-                          className={`outcome-trade-btn ${network.current === 'genlayer' ? 'needs-switch' : ''}`}
-                          onClick={() => handleTrade(market, outcome)}
-                          disabled={!isConnected || network.isSwitching}
-                          title={
-                            !isConnected
-                              ? 'Connect your wallet to trade'
-                              : network.isSwitching
-                                ? 'Switching networks...'
-                                : network.current === 'genlayer'
-                                  ? 'Click to switch to BNB Chain and trade'
-                                  : !isReady
-                                    ? 'SDK initializing...'
-                                    : 'Trade this outcome'
-                          }
-                        >
-                          {!isConnected
-                            ? 'Connect Wallet to Trade'
-                            : network.isSwitching
-                              ? 'Switching...'
-                              : network.current === 'genlayer'
-                                ? 'Switch to BNB Chain'
-                                : 'Trade'}
-                        </button>
-                      </div>
-                    ))}
+                      )
+                    })}
                   </div>
                 </div>
               ))}
             </div>
           </div>
 
-          {/* GenLayer Analysis */}
           <div className="market-detail-analysis">
             <h3>GenLayer AI Analysis</h3>
 
-            {analysisStep === 'input' && (
+            {analysisStep === 'input' && !analysis && (
               <div className="analysis-input">
                 {!isConnected && (
                   <div className="analysis-connect-prompt">
@@ -384,7 +319,7 @@ export function MarketGroupDetail() {
                       <div className="fee-input-group">
                         <input
                           type="number"
-                          min={minFeeGen.toString()}
+                          min={minFees.analysis.toString()}
                           step="0.1"
                           value={genAmount}
                           onChange={(e) => setGenAmount(e.target.value)}
@@ -392,18 +327,18 @@ export function MarketGroupDetail() {
                         />
                         <span className="gen-label">GEN</span>
                       </div>
-                      <span className="fee-hint">Minimum: {minFeeGen} GEN</span>
+                      <span className="fee-hint">Minimum: {minFees.analysis} GEN</span>
                     </div>
 
-                    {analysisError && <div className="error-message">{analysisError}</div>}
+                    {genLayerError && <div className="error-message">{genLayerError}</div>}
 
                     <button
                       className="btn-analyze-submit"
                       onClick={handleAnalyze}
-                      disabled={analyzing}
+                      disabled={genLayerLoading}
                     >
                       <span className="gen-icon">⚡</span>
-                      {analyzing ? 'Processing...' : `Analyze for ${parseFloat(genAmount) || 0} GEN`}
+                      {genLayerLoading ? 'Processing...' : `Analyze for ${parseFloat(genAmount) || 0} GEN`}
                     </button>
                   </>
                 )}
@@ -419,25 +354,20 @@ export function MarketGroupDetail() {
                 </div>
                 <h4>GenLayer AI Consensus in Progress</h4>
                 <p className="tx-status">{txStatus}</p>
-                {progress && 'txHash' in progress && (
-                  <p className="tx-hash">
-                    Tx: {progress.txHash.slice(0, 10)}...{progress.txHash.slice(-8)}
-                  </p>
-                )}
                 <div className="analyze-steps">
-                  <div className={`step ${progress && progress.stage !== 'submitted' ? 'active' : ''}`}>
+                  <div className="step active">
                     <span className="step-dot"></span>
                     <span>Transaction submitted</span>
                   </div>
-                  <div className={`step ${progress && (progress.stage === 'verifying' || progress.stage === 'finalizing' || progress.stage === 'completed') ? 'active' : ''}`}>
+                  <div className="step">
                     <span className="step-dot"></span>
                     <span>Leader validator proposes result</span>
                   </div>
-                  <div className={`step ${progress && (progress.stage === 'finalizing' || progress.stage === 'completed') ? 'active' : ''}`}>
+                  <div className="step">
                     <span className="step-dot"></span>
                     <span>Consensus validators verify</span>
                   </div>
-                  <div className={`step ${progress && progress.stage === 'completed' ? 'active' : ''}`}>
+                  <div className="step">
                     <span className="step-dot"></span>
                     <span>Result finalized on-chain</span>
                   </div>
@@ -500,9 +430,7 @@ export function MarketGroupDetail() {
                   <ul className="factor-list">
                     {analysis.keyFactors.map((factor, idx) => (
                       <li key={idx}>
-                        <span className="factor-bullet" style={{ color: sentiment.color }}>
-                          ●
-                        </span>
+                        <span className="factor-bullet" style={{ color: sentiment.color }}>●</span>
                         {factor}
                       </li>
                     ))}
@@ -528,32 +456,9 @@ export function MarketGroupDetail() {
                 </div>
               </div>
             )}
-
-            {analysisStep === 'result' && !analysis && (
-              <div className="analysis-input">
-                <div className="error-message">
-                  {analysisError || 'Analysis completed but no data was returned. The contract may need to be redeployed.'}
-                </div>
-                <button className="btn btn-secondary" onClick={handleResetAnalysis}>
-                  Try Again
-                </button>
-              </div>
-            )}
           </div>
         </div>
       </div>
-
-      {showTradeModal && tradeMarket && tradeOutcome && (
-        <TradeModal
-          market={tradeMarket}
-          outcome={tradeOutcome}
-          onClose={() => {
-            setShowTradeModal(false);
-            setTradeOutcome(null);
-            setTradeMarket(null);
-          }}
-        />
-      )}
     </div>
-  );
+  )
 }

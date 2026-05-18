@@ -1,7 +1,7 @@
 {
-  "name": "predict-dapp",
-  "version": "1.0.0",
-  "description": "Decentralized prediction market betting application on BNB Chain",
+  "name": "predictify",
+  "version": "2.0.0",
+  "description": "AI-powered prediction markets with Polymarket data and GenLayer resolution",
   "private": false,
   "type": "module",
   "scripts": {
@@ -11,8 +11,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@predictdotfun/sdk": "^1.2.4",
     "@rainbow-me/rainbowkit": "^2.2.10",
+    "@supabase/supabase-js": "^2.47.0",
     "@tanstack/react-query": "^5.90.12",
     "ethers": "^6.16.0",
     "genlayer-js": "^1.1.2",

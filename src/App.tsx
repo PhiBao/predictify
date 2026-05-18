@@ -1,90 +1,75 @@
-import { Routes, Route, useLocation } from 'react-router-dom';
-import { useAccount } from 'wagmi';
-import { WalletConnect } from './components/WalletConnect';
-import { MarketsList } from './components/MarketsList';
-import { UserPositions } from './components/UserPositions';
-import { MarketDetail } from './components/MarketDetail';
-import { MarketGroupDetail } from './components/MarketGroupDetail';
-import { ToastProvider } from './contexts/ToastContext';
-import { ScrollToTop } from './components/ScrollToTop';
-import { useNetworkState } from './hooks/useNetworkState';
-import './App.css';
+import { Routes, Route, useLocation } from 'react-router-dom'
+import { useAccount } from 'wagmi'
+import { WalletConnect } from './components/WalletConnect'
+import { MarketsList } from './components/MarketsList'
+import { MarketDetail } from './components/MarketDetail'
+import { MarketGroupDetail } from './components/MarketGroupDetail'
+import { ToastProvider } from './contexts/ToastContext'
+import { ScrollToTop } from './components/ScrollToTop'
+import { useNetworkState } from './hooks/useNetworkState'
+import './App.css'
 
 function HomePage() {
-  const { isConnected } = useAccount();
-
   return (
     <>
-      {/* Hero Section */}
       <section className="hero-section">
         <div className="hero-content">
-          <h1 className="hero-title">Trade the Future.</h1>
+          <h1 className="hero-title">Predict the Future.</h1>
           <p className="hero-subtitle">
-            Decentralized prediction markets powered by AI.
-            Analyze with GenLayer, trade with confidence.
+            AI-powered prediction markets with trustless resolution.
+            Markets from Polymarket, resolved by GenLayer.
           </p>
           <div className="hero-ctas">
             <a href="#markets" className="btn-pill btn-pill-primary">
               Explore Markets
             </a>
-            <a href="https://dev.predict.fun" target="_blank" rel="noopener noreferrer" className="btn-pill btn-pill-outline">
-              Learn more ›
+            <a href="https://genlayer.com" target="_blank" rel="noopener noreferrer" className="btn-pill btn-pill-outline">
+              Learn more about GenLayer
             </a>
           </div>
         </div>
       </section>
 
-      {/* Features Section */}
       <section className="features-section">
         <div className="features-grid">
           <div className="feature-card">
-            <div className="feature-icon">🎯</div>
-            <h3 className="feature-title">Prediction Markets</h3>
+            <div className="feature-icon">📊</div>
+            <h3 className="feature-title">Polymarket Markets</h3>
             <p className="feature-description">
-              Trade on real-world outcomes across crypto, politics, sports, and more with deep liquidity.
+              Browse real prediction markets with deep liquidity across politics, crypto, sports, and more.
             </p>
           </div>
           <div className="feature-card">
             <div className="feature-icon">🧠</div>
             <h3 className="feature-title">GenLayer AI Analysis</h3>
             <p className="feature-description">
-              Leverage AI-powered market intelligence. Pay with native GEN tokens for real-time sentiment and risk analysis.
+              Get AI-powered market intelligence with sentiment analysis, risk assessment, and key factors.
             </p>
           </div>
           <div className="feature-card">
-            <div className="feature-icon">🔐</div>
-            <h3 className="feature-title">Self-Custodial</h3>
+            <div className="feature-icon">⚖️</div>
+            <h3 className="feature-title">Trustless Resolution</h3>
             <p className="feature-description">
-              Your keys, your positions. Trade directly from your wallet with no intermediaries or custodial risk.
+              Markets resolved by GenLayer AI consensus with dispute review. No central authority needed.
             </p>
           </div>
         </div>
       </section>
 
-      {/* Positions Section */}
-      {isConnected && (
-        <section id="positions" className="section-light">
-          <div className="section-content">
-            <UserPositions />
-          </div>
-        </section>
-      )}
-
-      {/* Markets Section */}
       <section id="markets" className="section-light">
         <div className="section-content">
           <MarketsList />
         </div>
       </section>
     </>
-  );
+  )
 }
 
 function NetworkBadge() {
-  const { isConnected } = useAccount();
-  const network = useNetworkState();
+  const { isConnected } = useAccount()
+  const network = useNetworkState()
 
-  if (!isConnected || network.isChecking) return null;
+  if (!isConnected || network.isChecking) return null
 
   if (network.current === 'genlayer') {
     return (
@@ -92,7 +77,7 @@ function NetworkBadge() {
         <span className="network-dot" />
         GenLayer
       </span>
-    );
+    )
   }
 
   if (network.current === 'bnb') {
@@ -101,20 +86,19 @@ function NetworkBadge() {
         <span className="network-dot still" />
         BNB Chain
       </span>
-    );
+    )
   }
 
-  return null;
+  return null
 }
 
 function App() {
-  const location = useLocation();
-  const isMarketPage = location.pathname.startsWith('/market/');
+  const location = useLocation()
+  const isMarketPage = location.pathname.startsWith('/market/')
 
   return (
     <ToastProvider>
       <div className="app">
-        {/* Apple-style Navigation */}
         <nav className="app-nav">
           <div className="nav-content">
             <a href="/" className="nav-brand">
@@ -126,8 +110,8 @@ function App() {
             </a>
             <div className="nav-links">
               <a href="/" className="nav-link">Markets</a>
-              <a href="/#positions" className="nav-link">Positions</a>
-              <a href="https://dev.predict.fun" target="_blank" rel="noopener noreferrer" className="nav-link">Docs</a>
+              <a href="https://genlayer.com" target="_blank" rel="noopener noreferrer" className="nav-link">GenLayer</a>
+              <a href="https://polymarket.com" target="_blank" rel="noopener noreferrer" className="nav-link">Polymarket</a>
             </div>
             <div className="nav-actions">
               <NetworkBadge />
@@ -139,25 +123,26 @@ function App() {
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/market/:id" element={<MarketDetail />} />
-          <Route path="/market/group/:categorySlug" element={<MarketGroupDetail />} />
+          <Route path="/market/group/:slug" element={<MarketGroupDetail />} />
         </Routes>
 
-        {/* Footer - hide on market detail for cleaner focus */}
         {!isMarketPage && (
           <footer className="app-footer">
             <div className="footer-content">
               <p className="footer-text">
-                Powered by{' '}
-                <a href="https://predict.fun" target="_blank" rel="noopener noreferrer">
-                  Predict.fun
+                Markets from{' '}
+                <a href="https://polymarket.com" target="_blank" rel="noopener noreferrer">
+                  Polymarket
                 </a>
                 {' · '}
-                <a href="https://dev.predict.fun" target="_blank" rel="noopener noreferrer">
-                  API Docs
-                </a>
-                {' · '}
+                Resolution by{' '}
                 <a href="https://genlayer.com" target="_blank" rel="noopener noreferrer">
                   GenLayer
+                </a>
+                {' · '}
+                Indexed on{' '}
+                <a href="https://supabase.com" target="_blank" rel="noopener noreferrer">
+                  Supabase
                 </a>
               </p>
             </div>
@@ -167,7 +152,7 @@ function App() {
         <ScrollToTop />
       </div>
     </ToastProvider>
-  );
+  )
 }
 
-export default App;
+export default App

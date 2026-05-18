@@ -1,12 +1,13 @@
-# Agent Instructions — Predict.fun GenLayer Edition
+# Agent Instructions — Predictify v2
 
 ## Project Overview
 
-This is a React 19 + TypeScript + Vite prediction market DApp on BNB Chain, upgraded with:
-1. **GenLayer AI market analysis** via real deployed Intelligent Contract
-2. **Apple-inspired design system** with glass navigation and cinematic sections
-3. **Unified wallet** — single MetaMask handles both BNB Chain trading and GenLayer analysis
-4. **Security-hardened codebase** following audit best practices
+This is a React 19 + TypeScript + Vite prediction market DApp with:
+1. **Polymarket data** — markets fetched from Polymarket Gamma API
+2. **Supabase indexing** — all market data cached and indexed in Supabase
+3. **GenLayer AI** — handles market analysis, outcome resolution, and dispute review
+4. **Apple-inspired design system** with glass navigation and cinematic sections
+5. **Unified wallet** — MetaMask for GenLayer interactions
 
 ## Quick Commands
 
@@ -22,14 +23,14 @@ npm run preview   # Preview production build
 ```
 src/
   components/         # UI components (Apple design system)
-    MarketCard.tsx        # Market card with binary side-by-side outcomes
+    MarketCard.tsx        # Market card with outcome probabilities
     GroupedMarketCard.tsx # Grouped card with internal scroll for rows
-    MarketsList.tsx       # Market grid with Live/All filter + grouping
-    MarketDetail.tsx      # Detail page with markdown, outcomes, GenLayer analysis
+    MarketsList.tsx       # Market grid with filter tabs (Live/Trending/Closing Soon/Resolved/All)
+    MarketDetail.tsx      # Detail page with outcomes, GenLayer analysis + resolution
     MarketGroupDetail.tsx # Unified group detail page with all markets
-    TradeModal.tsx        # Buy/sell order interface (Market/Limit)
-    SellModal.tsx         # Sell position modal
-    UserPositions.tsx     # Portfolio + claim winnings + dismiss resolved
+    ResolutionModal.tsx   # Request market resolution via GenLayer
+    DisputeModal.tsx      # Challenge a resolution with evidence
+    AnalyzeModal.tsx      # Standalone AI analysis modal
     WalletConnect.tsx     # RainbowKit wallet button
     Toast.tsx             # Notification system
     MarketSkeleton.tsx    # Shimmer loading skeletons
@@ -37,64 +38,140 @@ src/
   contexts/
     ToastContext.tsx      # Global toast notifications
   hooks/
-    usePredictSDK.ts      # OrderBuilder SDK initialization
-    useGenLayer.ts        # GenLayer analysis state management
-    useNetworkState.ts    # Unified BNB/GenLayer network detection + switching
+    useGenLayer.ts        # GenLayer state management (analysis, resolution, disputes)
+    useNetworkState.ts    # Network detection + switching
   lib/genlayer/
     client.ts             # GenLayer client + MetaMask network helpers
   services/
-    predictAPI.ts         # Predict.fun REST API client
-    genlayer.ts           # REAL GenLayer contract service (write + poll + read)
+    polymarketAPI.ts      # Polymarket Gamma API client
+    supabase.ts           # Supabase client for market indexing
+    genlayer.ts           # GenLayer contract service (analysis + resolution + disputes)
   types/
-    predict.ts            # TypeScript definitions + formatPriceLevel helper
+    market.ts             # TypeScript definitions for markets, analysis, resolution, disputes
+    predict.ts            # Re-exports from market.ts for backwards compatibility
   config/
-    wagmi.ts              # Wagmi + RainbowKit config (BNB Chain only)
+    wagmi.ts              # Wagmi + RainbowKit config
   App.tsx               # Routes, nav with network badge, hero, features
   App.css               # Apple Design System + detail page + card styles
   index.css             # Global design tokens
   main.tsx              # Entry point
 
 contracts/
-  MarketAnalyzer.py     # GenLayer Intelligent Contract (deploy to Studio)
+  MarketResolver.py     # GenLayer Intelligent Contract (deploy to Studio)
 ```
 
 ## Key Technical Details
 
-### Predict.fun SDK
-- Uses `@predictdotfun/sdk` OrderBuilder for order creation
-- BNB Chain Mainnet (`ChainId.BnbMainnet`)
-- Requires JWT authentication for order submission
-- Handles both standard and NegRisk markets
-- Newer helpers available: `setApprovals()`, `redeemPositions()`, `mergePositions()`
+### Data Flow
 
-### Unified Wallet + Network Switching
-
-**One MetaMask wallet, two networks.** The app uses a single `useAccount()` from wagmi and switches networks via raw `window.ethereum.request()` calls:
-
-```typescript
-// hooks/useNetworkState.ts
-const network = useNetworkState();
-// network.current: 'bnb' | 'genlayer' | null
-// network.isChecking: true while detecting
-// network.isSwitching: true while switching
-// network.switchToBSC(): Promise<void>
-// network.switchToGenLayer(): Promise<void>
+```
+Polymarket Gamma API → Supabase (cache/index) → Frontend
+                                                    ↓
+                                              GenLayer Contract
+                                          (Analysis/Resolution/Disputes)
 ```
 
-**Trade buttons auto-switch:** If user is on GenLayer and clicks a trade button, the app automatically switches to BNB Chain first, then opens the trade modal. No manual switching needed.
+### Polymarket Integration
+- Markets fetched from `https://gamma-api.polymarket.com/events`
+- Supports filtering by category, tag, slug, closed status
+- Markets are synced to Supabase for faster loading and offline caching
+- No trading — markets are informational with GenLayer-powered resolution
 
-**Analysis buttons auto-switch:** If user is on BNB Chain and clicks "Analyze", the app shows a "Switch to GenLayer Studio" button.
+### Supabase Integration
+- Tables: `markets`, `analyses`, `resolutions`, `disputes`, `sync_metadata`
+- Markets are upserted on fetch for caching
+- Analysis and resolution results are stored after GenLayer transactions
+- Provides fallback when Polymarket API is unavailable
 
-**Navigation badge:** The top nav shows a purple pulsing dot for GenLayer or a gold dot for BNB Chain, so users always know which network they're on.
+**Required Supabase schema:**
+```sql
+CREATE TABLE markets (
+  id TEXT PRIMARY KEY,
+  condition_id TEXT,
+  question TEXT NOT NULL,
+  description TEXT,
+  slug TEXT,
+  category TEXT,
+  tags TEXT[],
+  outcomes TEXT[],
+  outcome_prices TEXT[],
+  probabilities FLOAT[],
+  volume FLOAT,
+  volume_24h FLOAT,
+  liquidity FLOAT,
+  status TEXT,
+  close_date TEXT,
+  end_date TEXT,
+  image TEXT,
+  icon TEXT,
+  resolution_source TEXT,
+  group_slug TEXT,
+  group_name TEXT,
+  last_synced TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE analyses (
+  id SERIAL PRIMARY KEY,
+  market_id TEXT NOT NULL,
+  sentiment TEXT,
+  confidence INT,
+  summary TEXT,
+  key_factors TEXT[],
+  risk_level TEXT,
+  recommended_action TEXT,
+  timestamp TEXT,
+  tx_hash TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE resolutions (
+  id SERIAL PRIMARY KEY,
+  market_id TEXT NOT NULL,
+  resolved_outcome TEXT,
+  outcome_index INT,
+  confidence INT,
+  reasoning TEXT,
+  evidence TEXT[],
+  timestamp TEXT,
+  tx_hash TEXT,
+  status TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE disputes (
+  id SERIAL PRIMARY KEY,
+  market_id TEXT NOT NULL,
+  resolution_id INT,
+  challenger TEXT,
+  proposed_outcome TEXT,
+  proposed_outcome_index INT,
+  evidence TEXT,
+  reasoning TEXT,
+  status TEXT,
+  timestamp TEXT,
+  tx_hash TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE sync_metadata (
+  id INT PRIMARY KEY DEFAULT 1,
+  last_sync TIMESTAMPTZ
+);
+```
 
 ### GenLayer Integration
-- `genlayer-js` SDK for blockchain interactions
-- Configured for `studionet` by default
-- **REAL contract calls** — no simulation
-- Contract: `contracts/MarketAnalyzer.py` (deploy manually to Studio)
-- Payment: native GEN via `value: BigInt(amountWei)`
-- Transaction polling via SDK-native `client.waitForTransactionReceipt({ status: TransactionStatus.FINALIZED })`
-- MetaMask must be on GenLayer network (Chain ID 61999)
+
+**One contract handles everything:** `contracts/MarketResolver.py`
+
+**Three core functions:**
+1. `analyze_market()` — AI opinion on market sentiment, risk, key factors
+2. `resolve_market()` — AI determines the actual outcome based on evidence
+3. `dispute_resolution()` — Challenge a resolution; AI reviews and makes final judgment
+
+**Network:** GenLayer Studio (Chain ID 61999)
+**Payment:** native GEN tokens via `value: BigInt(amountWei)`
 
 ### GenLayer Contract Pattern (v0.1.x — Studio Compatible)
 
@@ -108,80 +185,54 @@ class AnalysisResult:
     sentiment: str
     confidence: u32
     summary: str
-    key_factors_json: str    # JSON string, NOT DynArray (avoids serialization issues)
+    key_factors_json: str
     risk_level: str
     recommended_action: str
     timestamp: str
     analyst: Address
 
-class MarketAnalyzer(gl.Contract):
+@allow_storage
+@dataclass
+class ResolutionResult:
+    market_id: str
+    resolved_outcome: str
+    outcome_index: u32
+    confidence: u32
+    reasoning: str
+    evidence_json: str
+    timestamp: str
+    resolver: Address
+    is_finalized: bool
+    dispute_count: u32
+
+@allow_storage
+@dataclass
+class DisputeRecord:
+    market_id: str
+    resolution_id: u256
+    challenger: Address
+    proposed_outcome: str
+    proposed_outcome_index: u32
+    evidence: str
+    reasoning: str
+    timestamp: str
+    is_valid: bool
+    reviewed: bool
+
+class MarketResolver(gl.Contract):
     analyses: TreeMap[u256, AnalysisResult]
     analysis_count: u256
-    min_fee: u256
-
-    def __init__(self):
-        self.analysis_count = u256(0)
-        self.min_fee = u256(1000000000000000000)  # 1 GEN
-
-    @gl.public.write.payable
-    def analyze_market(self, market_question: str, market_description: str, outcome_names: DynArray[str]):
-        fee = gl.message.value
-        if fee < self.min_fee:
-            raise gl.UserError("Insufficient fee")
-
-        prompt = "..."
-
-        def leader_fn():
-            return gl.nondet.exec_prompt(prompt, response_format="json")
-
-        def validator_fn(leader_res):
-            # Compare sentiment, risk_level, confidence±10
-            return True  # or False
-
-        result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
-
-        # Store key_factors as JSON string to avoid DynArray issues
-        factors = result.get("key_factors", [])
-        key_factors_json = str(factors) if isinstance(factors, list) else '[]'
-
-        analysis = AnalysisResult(
-            sentiment=str(result.get("sentiment", "neutral")),
-            confidence=u32(int(result.get("confidence", 50))),
-            summary=str(result.get("summary", "")),
-            key_factors_json=key_factors_json,
-            risk_level=str(result.get("risk_level", "medium")),
-            recommended_action=str(result.get("recommended_action", "")),
-            timestamp=str(gl.message_raw.get("datetime", "")),
-            analyst=gl.message.sender_address,
-        )
-
-        self.analysis_count = u256(int(self.analysis_count) + 1)
-        self.analyses[self.analysis_count] = analysis
-
-    @gl.public.view
-    def get_analysis(self, analysis_id: u256):
-        if analysis_id == u256(0) or analysis_id > self.analysis_count:
-            raise gl.UserError("Analysis not found")
-        a = self.analyses[analysis_id]
-        return {
-            "sentiment": a.sentiment,
-            "confidence": int(a.confidence),
-            "summary": a.summary,
-            "key_factors": a.key_factors_json,
-            "risk_level": a.risk_level,
-            "recommended_action": a.recommended_action,
-            "timestamp": a.timestamp,
-            "analyst": a.analyst.as_hex,
-        }
+    resolutions: TreeMap[u256, ResolutionResult]
+    resolution_count: u256
+    disputes: TreeMap[u256, DisputeRecord]
+    dispute_count: u256
+    market_resolutions: TreeMap[str, u256]
+    min_analysis_fee: u256
+    min_resolution_fee: u256
+    min_dispute_fee: u256
+    owner: Address
+    # ... see contracts/MarketResolver.py for full implementation
 ```
-
-**Critical v0.1.x vs v0.3.0 differences:**
-- `from genlayer import *` (not `import genlayer as gl` + `from genlayer.types import *`)
-- `gl.Contract` (not `gl.contract.Contract`)
-- `@allow_storage` (not `gl.storage.allow`)
-- `gl.UserError` (not `gl.vm.UserError`)
-- `TreeMap`, `DynArray`, `u256`, `Address` available via star import
-- `gl.vm.run_nondet_unsafe`, `gl.nondet.exec_prompt` all work on Studio
 
 ### Frontend Patterns
 
@@ -197,7 +248,6 @@ const receipt = await client.waitForTransactionReceipt({
 
 **u256 parsing from readContract:**
 ```typescript
-// genlayer-js returns raw primitives for simple types, NOT { value: bigint }
 function parseU256(raw: unknown): number {
   if (typeof raw === 'bigint') return Number(raw);
   if (typeof raw === 'number') return raw;
@@ -207,37 +257,11 @@ function parseU256(raw: unknown): number {
 }
 ```
 
-**Robust read-after-write (multiple candidate IDs):**
-```typescript
-// After tx finalization, read count again to know exact slot
-const countAfter = parseU256(await client.readContract({...}));
-// Try multiple IDs in order of likelihood, return first valid one
-const candidateIds = [countAfter, countAfter - 1, countBefore + 1];
-for (const id of candidateIds) {
-  const result = await client.readContract({ functionName: 'get_analysis', args: [BigInt(id)] });
-  const parsed = parseAnalysisResult(result);
-  if (parsed.sentiment && parsed.sentiment !== 'neutral') return parsed;
-  if (parsed.summary && parsed.summary.length > 10) return parsed;
-}
-```
-
-**readContract Map conversion:**
-```typescript
-const result = await client.readContract({ address, functionName, args: [] });
-// result is a JS Map — convert to plain object:
-const obj: Record<string, unknown> = {};
-result.forEach((value, key) => { obj[key] = value; });
-```
-
 ### Design System
 - Apple Design System colors, typography, spacing
 - CSS custom properties in `index.css`
 - Component styles in `App.css`
 - No external UI library — pure custom CSS
-- **Card features:** same height grid, staggered entrance animations, hover lift + shadow
-- **Binary outcomes:** side-by-side grid layout for 2-option markets
-- **Grouped markets:** internal scroll with custom thin scrollbar
-- **Network-aware buttons:** amber border indicates auto-switch will happen on click
 
 ## Code Quality Standards
 
@@ -253,16 +277,17 @@ result.forEach((value, key) => { obj[key] = value; });
 | Variable | Required | Description |
 |----------|----------|-------------|
 | VITE_WALLETCONNECT_PROJECT_ID | Yes | WalletConnect project ID |
-| VITE_API_KEY | Yes | Predict.fun API key |
-| VITE_GENLAYER_RPC | No | GenLayer RPC endpoint |
-| VITE_GENLAYER_ANALYSIS_CONTRACT | Yes | Deployed MarketAnalyzer address |
+| VITE_SUPABASE_URL | Yes | Supabase project URL |
+| VITE_SUPABASE_ANON_KEY | Yes | Supabase anon key |
+| VITE_GENLAYER_RPC | No | GenLayer RPC endpoint (default: https://studio.genlayer.com/api) |
+| VITE_GENLAYER_CONTRACT | Yes | Deployed MarketResolver address |
 
 ## Deploying the GenLayer Contract
 
 1. Open [GenLayer Studio](https://studio.genlayer.com)
-2. Create new contract → paste `contracts/MarketAnalyzer.py`
+2. Create new contract → paste `contracts/MarketResolver.py`
 3. Deploy → copy contract address
-4. Add to `.env`: `VITE_GENLAYER_ANALYSIS_CONTRACT=0x...`
+4. Add to `.env`: `VITE_GENLAYER_CONTRACT=0x...`
 5. Get GEN from Studio faucet
 
 ## Design Tokens Reference
@@ -290,24 +315,23 @@ result.forEach((value, key) => { obj[key] = value; });
 - Check Node.js version (18+)
 - Run `npm install` to ensure all deps
 
-**Wallet won't connect (BNB):**
-- Verify BNB Chain network (Chain ID 56)
+**Wallet won't connect:**
+- Verify MetaMask is installed and unlocked
 - Check WalletConnect project ID
 
-**GenLayer analysis fails:**
+**GenLayer operations fail:**
 - Ensure MetaMask is connected to GenLayer Studio network (Chain ID 61999)
 - Check GEN balance (get from Studio faucet)
 - Verify contract address is set in `.env`
 - Check browser console for specific error
-- If analysis returns old data: check `parseU256` is handling the return type correctly
 
-**Trade button shows "Switch to BNB Chain" even after switching:**
-- The button now auto-switches on click. If it still shows the message, `useNetworkState` may not have detected the switch yet. Wait 1-2 seconds for wagmi to update.
+**Markets not loading:**
+- Check Supabase connection (URL and anon key in `.env`)
+- Polymarket API may be rate-limited; Supabase cache provides fallback
 
 ## External Resources
 
-- [Predict.fun Docs](https://dev.predict.fun)
-- [Predict SDK README](https://github.com/PredictDotFun/sdk/blob/main/README.md)
+- [Polymarket API Docs](https://polymarket.com/)
 - [GenLayer Full Docs](https://docs.genlayer.com/full-documentation.txt)
 - [GenLayer JS SDK API](https://sdk.genlayer.com/main/_static/ai/api.txt)
-- [Gotham Court Reference](https://github.com/PhiBao/gotham-court/blob/main/CLAUDE.md)
+- [Supabase Docs](https://supabase.com/docs)

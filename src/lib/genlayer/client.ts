@@ -34,7 +34,7 @@ export const BSC_NETWORK = {
 };
 
 export function getContractAddress(): string {
-  return import.meta.env.VITE_GENLAYER_ANALYSIS_CONTRACT || '';
+  return import.meta.env.VITE_GENLAYER_CONTRACT || '';
 }
 
 // --- MetaMask Network Helpers ---
