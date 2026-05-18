@@ -4,6 +4,8 @@ import type {
   SupabaseAnalysisRow,
   SupabaseResolutionRow,
   SupabaseDisputeRow,
+  SupabasePositionRow,
+  SupabaseTradeRow,
   MarketStatus,
   ResolutionStatus,
 } from '../types/market'
@@ -175,6 +177,66 @@ export async function updateDisputeStatus(id: number, status: string): Promise<v
     .update({ status })
     .eq('id', id)
   if (error) throw new Error(`Failed to update dispute: ${error.message}`)
+}
+
+export async function upsertPosition(position: Omit<SupabasePositionRow, 'created_at' | 'updated_at'>): Promise<void> {
+  const { error } = await supabase
+    .from('positions')
+    .upsert(position, { onConflict: 'market_id,user,outcome_index' })
+  if (error) throw new Error(`Failed to upsert position: ${error.message}`)
+}
+
+export async function getUserPositions(marketId: string, user: string): Promise<SupabasePositionRow[]> {
+  const { data, error } = await supabase
+    .from('positions')
+    .select('*')
+    .eq('market_id', marketId)
+    .eq('user', user)
+    .gt('shares', 0)
+  if (error) throw new Error(`Failed to fetch positions: ${error.message}`)
+  return data || []
+}
+
+export async function getAllUserPositions(user: string): Promise<SupabasePositionRow[]> {
+  const { data, error } = await supabase
+    .from('positions')
+    .select('*')
+    .eq('user', user)
+    .gt('shares', 0)
+  if (error) throw new Error(`Failed to fetch positions: ${error.message}`)
+  return data || []
+}
+
+export async function insertTrade(trade: Omit<SupabaseTradeRow, 'created_at'>): Promise<number> {
+  const { data, error } = await supabase
+    .from('trades')
+    .insert(trade)
+    .select('id')
+    .single()
+  if (error) throw new Error(`Failed to insert trade: ${error.message}`)
+  return data.id
+}
+
+export async function getMarketTrades(marketId: string): Promise<SupabaseTradeRow[]> {
+  const { data, error } = await supabase
+    .from('trades')
+    .select('*')
+    .eq('market_id', marketId)
+    .order('created_at', { ascending: false })
+    .limit(50)
+  if (error) throw new Error(`Failed to fetch trades: ${error.message}`)
+  return data || []
+}
+
+export async function getUserTrades(marketId: string, user: string): Promise<SupabaseTradeRow[]> {
+  const { data, error } = await supabase
+    .from('trades')
+    .select('*')
+    .eq('market_id', marketId)
+    .eq('user', user)
+    .order('created_at', { ascending: false })
+  if (error) throw new Error(`Failed to fetch trades: ${error.message}`)
+  return data || []
 }
 
 export async function getLastSyncTime(): Promise<string | null> {

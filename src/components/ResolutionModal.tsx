@@ -40,7 +40,7 @@ export function ResolutionModal({ market, onClose, onResolved }: ResolutionModal
     setStep('processing')
 
     try {
-      const result = await resolve(market.id, market.question, market.description, market.outcomes, genAmountNum)
+      const result = await resolve(market.id, genAmountNum)
       if (result) {
         onResolved(result)
         setStep('done')

@@ -2,9 +2,18 @@ import { useEffect, useState, useMemo, useCallback } from 'react'
 import { MarketCard } from './MarketCard'
 import { GroupedMarketCard, type MarketGroup } from './GroupedMarketCard'
 import { MarketsSkeleton } from './MarketSkeleton'
-import { getActiveMarkets, getTrendingMarkets, getClosingSoonMarkets } from '../services/polymarketAPI'
-import { getMarkets as getSupabaseMarkets, upsertMarkets } from '../services/supabase'
+import { getMarkets as getSupabaseMarkets } from '../services/supabase'
 import type { PolymarketMarket, MarketFilter, SupabaseMarketRow } from '../types/market'
+
+function parseCategory(raw: string): string {
+  if (!raw) return 'Other'
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed.label || parsed.name || raw
+  } catch {
+    return raw
+  }
+}
 
 function toPolymarketMarket(row: SupabaseMarketRow): PolymarketMarket {
   return {
@@ -13,7 +22,7 @@ function toPolymarketMarket(row: SupabaseMarketRow): PolymarketMarket {
     question: row.question,
     description: row.description,
     slug: row.slug,
-    category: row.category,
+    category: parseCategory(row.category),
     tags: row.tags,
     outcomes: row.outcomes,
     outcomePrices: row.outcome_prices,
@@ -35,8 +44,7 @@ function toPolymarketMarket(row: SupabaseMarketRow): PolymarketMarket {
 function deriveGroupTitle(markets: PolymarketMarket[]): string {
   if (markets.length === 0) return ''
   if (markets[0].groupName) return markets[0].groupName
-  const firstQuestion = markets[0].question
-  return firstQuestion
+  return markets[0].question
 }
 
 function groupMarkets(markets: PolymarketMarket[]): (PolymarketMarket | MarketGroup)[] {
@@ -94,67 +102,16 @@ export function MarketsList() {
       setLoading(true)
       setError(null)
 
-      let polymarketMarkets: PolymarketMarket[]
+      const supabaseMarkets = await getSupabaseMarkets({
+        status: filter === 'all' ? undefined : filter === 'active' ? 'active' : filter === 'resolved' ? 'resolved' : undefined,
+        limit: 200,
+      })
 
-      try {
-        const supabaseMarkets = await getSupabaseMarkets({
-          status: filter === 'all' ? undefined : filter === 'active' ? 'active' : filter === 'resolved' ? 'resolved' : undefined,
-          limit: 100,
-        })
-        if (supabaseMarkets.length > 0) {
-          polymarketMarkets = supabaseMarkets.map(toPolymarketMarket)
-        } else {
-          throw new Error('No cached data')
-        }
-      } catch {
-        switch (filter) {
-          case 'trending':
-            polymarketMarkets = await getTrendingMarkets(50)
-            break
-          case 'closing-soon':
-            polymarketMarkets = await getClosingSoonMarkets(50)
-            break
-          case 'resolved':
-            polymarketMarkets = await getActiveMarkets({ limit: 50, closed: true })
-            break
-          default:
-            polymarketMarkets = await getActiveMarkets({ limit: 50, closed: false })
-        }
-
-        const rows = polymarketMarkets.map((m) => ({
-          id: m.id,
-          condition_id: m.conditionId,
-          question: m.question,
-          description: m.description,
-          slug: m.slug,
-          category: m.category,
-          tags: m.tags,
-          outcomes: m.outcomes,
-          outcome_prices: m.outcomePrices,
-          probabilities: m.probabilities,
-          volume: m.volume,
-          volume_24h: m.volume24h,
-          liquidity: m.liquidity,
-          status: m.status,
-          close_date: m.closeDate,
-          end_date: m.endDate,
-          image: m.image,
-          icon: m.icon,
-          resolution_source: m.resolutionSource,
-          group_slug: m.groupSlug || null,
-          group_name: m.groupName || null,
-          last_synced: new Date().toISOString(),
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        }))
-        await upsertMarkets(rows)
-      }
-
+      const polymarketMarkets = supabaseMarkets.map(toPolymarketMarket)
       setMarkets(polymarketMarkets)
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to fetch markets'
       setError(errorMsg)
-      console.error('Market fetch error:', err)
     } finally {
       setLoading(false)
     }
@@ -207,7 +164,9 @@ export function MarketsList() {
       </div>
 
       {filteredItems.length === 0 ? (
-        <div className="no-markets">No markets available for this filter.</div>
+        <div className="no-markets">
+          {filter === 'active' ? 'No markets indexed yet. Ask the admin to sync markets.' : 'No markets available for this filter.'}
+        </div>
       ) : (
         <div className="markets-grid">
           {filteredItems.map((item, index) => {

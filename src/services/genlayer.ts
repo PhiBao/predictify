@@ -1,19 +1,10 @@
-import { createGenLayerClient, switchToGenLayerNetwork, switchToBSC } from '../lib/genlayer/client'
+import { createGenLayerClient, switchToGenLayerNetwork } from '../lib/genlayer/client'
 import type {
-  GenLayerAnalysis,
   GenLayerResolution,
   Dispute,
+  Position,
+  Trade,
 } from '../types/market'
-
-const TransactionStatus = {
-  UNINITIALIZED: 'UNINITIALIZED',
-  PENDING: 'PENDING',
-  PROPOSING: 'PROPOSING',
-  COMMITTING: 'COMMITTING',
-  GRACE: 'GRACE',
-  FINALIZED: 'FINALIZED',
-  FAILED: 'FAILED',
-} as const
 
 const CONTRACT_ADDRESS = import.meta.env.VITE_GENLAYER_CONTRACT || ''
 
@@ -25,44 +16,19 @@ function parseU256(raw: unknown): number {
   return Number(obj.value ?? 0)
 }
 
-function parseJsonField(raw: string): string[] {
-  try {
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : [raw]
-  } catch {
-    return [raw]
-  }
-}
-
-function parseAnalysisResult(raw: unknown): GenLayerAnalysis {
-  const obj = raw as Record<string, unknown>
-  return {
-    id: 0,
-    marketId: '',
-    sentiment: String(obj.sentiment || 'neutral'),
-    confidence: parseU256(obj.confidence),
-    summary: String(obj.summary || ''),
-    keyFactors: parseJsonField(String(obj.key_factors || '[]')),
-    riskLevel: String(obj.risk_level || 'medium'),
-    recommendedAction: String(obj.recommended_action || ''),
-    timestamp: String(obj.timestamp || ''),
-    txHash: '',
-  }
-}
-
 function parseResolutionResult(raw: unknown, marketId: string): GenLayerResolution {
   const obj = raw as Record<string, unknown>
   return {
     id: 0,
     marketId,
     resolvedOutcome: String(obj.resolved_outcome || ''),
-    outcomeIndex: parseU256(obj.outcome_index),
+    outcomeIndex: parseU256(obj.resolved_outcome_index),
     confidence: parseU256(obj.confidence),
     reasoning: String(obj.reasoning || ''),
-    evidence: parseJsonField(String(obj.evidence || '[]')),
     timestamp: String(obj.timestamp || ''),
     txHash: '',
     status: obj.is_finalized === true ? 'finalized' : 'resolved',
+    isFinalized: obj.is_finalized === true,
   }
 }
 
@@ -75,11 +41,37 @@ function parseDisputeResult(raw: unknown, marketId: string): Dispute {
     challenger: String(obj.challenger || ''),
     proposedOutcome: String(obj.proposed_outcome || ''),
     proposedOutcomeIndex: parseU256(obj.proposed_outcome_index),
-    evidence: String(obj.evidence || ''),
+    evidenceUrl: String(obj.evidence_url || ''),
     reasoning: String(obj.reasoning || ''),
     status: obj.is_valid === true ? 'accepted' : 'rejected',
     timestamp: String(obj.timestamp || ''),
     txHash: '',
+  }
+}
+
+function parsePositionResult(raw: unknown): Position {
+  const obj = raw as Record<string, unknown>
+  return {
+    marketId: String(obj.market_id || ''),
+    user: String(obj.user || ''),
+    outcomeIndex: parseU256(obj.outcome_index),
+    shares: parseU256(obj.shares),
+    avgPrice: parseU256(obj.avg_price),
+  }
+}
+
+function parseTradeResult(raw: unknown): Trade {
+  const obj = raw as Record<string, unknown>
+  return {
+    tradeId: parseU256(obj.trade_id),
+    marketId: String(obj.market_id || ''),
+    user: String(obj.user || ''),
+    outcomeIndex: parseU256(obj.outcome_index),
+    shares: parseU256(obj.shares),
+    pricePerShare: parseU256(obj.price_per_share),
+    totalCost: parseU256(obj.total_cost),
+    tradeType: String(obj.trade_type || 'buy') as 'buy' | 'sell',
+    timestamp: String(obj.timestamp || ''),
   }
 }
 
@@ -91,13 +83,13 @@ async function pollTransaction(
   try {
     onProgress?.('proposing')
     const receipt = await client.waitForTransactionReceipt({
-      hash: txHash,
-      status: TransactionStatus.FINALIZED,
+      hash: txHash as any,
+      status: 'FINALIZED' as any,
       interval: 3000,
       retries: 200,
     })
 
-    if (receipt.status === 'success' || receipt.status === TransactionStatus.FINALIZED) {
+    if (receipt.status === 'FINALIZED') {
       onProgress?.('completed')
       return true
     }
@@ -107,73 +99,67 @@ async function pollTransaction(
   }
 }
 
-export async function analyzeMarket(
+export async function buyShares(
+  account: string,
+  marketId: string,
   question: string,
-  description: string,
   outcomes: string[],
-  feeGen: number,
+  endDate: string,
+  outcomeIndex: number,
+  amountGen: number,
   onProgress?: (stage: string) => void
-): Promise<GenLayerAnalysis | null> {
+): Promise<boolean> {
   if (!CONTRACT_ADDRESS) throw new Error('GenLayer contract address not configured')
 
   await switchToGenLayerNetwork()
 
-  const client = createGenLayerClient()
-  const feeWei = BigInt(Math.floor(feeGen * 1e18))
+  const client = createGenLayerClient(account as `0x${string}`)
+  const amountWei = BigInt(Math.floor(amountGen * 1e18))
+  const outcomesStr = outcomes.join(', ')
 
   onProgress?.('submitted')
 
   const txHash = await client.writeContract({
     address: CONTRACT_ADDRESS,
-    functionName: 'analyze_market',
-    args: [question, description, outcomes],
-    value: feeWei,
+    functionName: 'buy_shares',
+    args: [marketId, question, outcomesStr, endDate, BigInt(outcomeIndex)],
+    value: amountWei,
   })
 
   const success = await pollTransaction(client, txHash, onProgress)
-  if (!success) throw new Error('Analysis transaction failed or timed out')
+  if (!success) throw new Error('Buy shares transaction failed or timed out')
+  return true
+}
 
-  onProgress?.('fetching_result')
+export async function sellShares(
+  account: string,
+  marketId: string,
+  outcomeIndex: number,
+  sharesAmount: number,
+  onProgress?: (stage: string) => void
+): Promise<boolean> {
+  if (!CONTRACT_ADDRESS) throw new Error('GenLayer contract address not configured')
 
-  const countAfter = parseU256(
-    await client.readContract({
-      address: CONTRACT_ADDRESS,
-      functionName: 'get_analysis_count',
-      args: [],
-    })
-  )
+  await switchToGenLayerNetwork()
 
-  for (let i = countAfter; i >= Math.max(1, countAfter - 3); i--) {
-    try {
-      const raw = await client.readContract({
-        address: CONTRACT_ADDRESS,
-        functionName: 'get_analysis',
-        args: [BigInt(i)],
-      })
-      const parsed = parseAnalysisResult(raw)
-      if (parsed.sentiment && parsed.sentiment !== 'neutral') {
-        parsed.id = i
-        parsed.txHash = txHash
-        return parsed
-      }
-      if (parsed.summary && parsed.summary.length > 10) {
-        parsed.id = i
-        parsed.txHash = txHash
-        return parsed
-      }
-    } catch {
-      continue
-    }
-  }
+  const client = createGenLayerClient(account as `0x${string}`)
 
-  throw new Error('Analysis completed but result could not be retrieved')
+  onProgress?.('submitted')
+
+  const txHash = await client.writeContract({
+    address: CONTRACT_ADDRESS,
+    functionName: 'sell_shares',
+    args: [marketId, BigInt(outcomeIndex), BigInt(sharesAmount)],
+    value: 0n,
+  })
+
+  const success = await pollTransaction(client, txHash, onProgress)
+  if (!success) throw new Error('Sell shares transaction failed or timed out')
+  return true
 }
 
 export async function resolveMarket(
   marketId: string,
-  question: string,
-  description: string,
-  outcomes: string[],
   feeGen: number,
   onProgress?: (stage: string) => void
 ): Promise<GenLayerResolution | null> {
@@ -189,7 +175,7 @@ export async function resolveMarket(
   const txHash = await client.writeContract({
     address: CONTRACT_ADDRESS,
     functionName: 'resolve_market',
-    args: [marketId, question, description, outcomes],
+    args: [marketId],
     value: feeWei,
   })
 
@@ -230,7 +216,8 @@ export async function resolveMarket(
 export async function disputeResolution(
   resolutionId: number,
   marketId: string,
-  outcomes: string[],
+  evidenceUrl: string,
+  reasoning: string,
   feeGen: number,
   onProgress?: (stage: string) => void
 ): Promise<Dispute | null> {
@@ -246,7 +233,7 @@ export async function disputeResolution(
   const txHash = await client.writeContract({
     address: CONTRACT_ADDRESS,
     functionName: 'dispute_resolution',
-    args: [BigInt(resolutionId), marketId, outcomes],
+    args: [BigInt(resolutionId), marketId, evidenceUrl, reasoning],
     value: feeWei,
   })
 
@@ -284,36 +271,45 @@ export async function disputeResolution(
   throw new Error('Dispute completed but result could not be retrieved')
 }
 
-export async function getAnalysis(_marketId: string): Promise<GenLayerAnalysis | null> {
+export async function getPosition(marketId: string, user: string, outcomeIndex: number): Promise<Position | null> {
   if (!CONTRACT_ADDRESS) return null
 
   const client = createGenLayerClient()
-  const count = parseU256(
-    await client.readContract({
+
+  try {
+    const raw = await client.readContract({
       address: CONTRACT_ADDRESS,
-      functionName: 'get_analysis_count',
-      args: [],
+      functionName: 'get_position',
+      args: [marketId, user, BigInt(outcomeIndex)],
     })
-  )
 
-  for (let i = count; i >= Math.max(1, count - 10); i--) {
-    try {
-      const raw = await client.readContract({
-        address: CONTRACT_ADDRESS,
-        functionName: 'get_analysis',
-        args: [BigInt(i)],
-      })
-      const parsed = parseAnalysisResult(raw)
-      parsed.id = i
-      if (parsed.summary && parsed.summary.length > 10) {
-        return parsed
-      }
-    } catch {
-      continue
-    }
+    if (!raw) return null
+
+    const parsed = parsePositionResult(raw)
+    return parsed
+  } catch {
+    return null
   }
+}
 
-  return null
+export async function getUserPositions(marketId: string, user: string): Promise<Position[]> {
+  if (!CONTRACT_ADDRESS) return []
+
+  const client = createGenLayerClient()
+
+  try {
+    const raw = await client.readContract({
+      address: CONTRACT_ADDRESS,
+      functionName: 'get_user_positions',
+      args: [marketId, user],
+    })
+
+    if (!Array.isArray(raw)) return []
+
+    return raw.map(parsePositionResult)
+  } catch {
+    return []
+  }
 }
 
 export async function getResolution(marketId: string): Promise<GenLayerResolution | null> {
@@ -337,19 +333,34 @@ export async function getResolution(marketId: string): Promise<GenLayerResolutio
   }
 }
 
-export async function getMinFees(): Promise<{ analysis: number; resolution: number; dispute: number }> {
+export async function getMarketTrades(marketId: string): Promise<Trade[]> {
+  if (!CONTRACT_ADDRESS) return []
+
+  const client = createGenLayerClient()
+
+  try {
+    const raw = await client.readContract({
+      address: CONTRACT_ADDRESS,
+      functionName: 'get_market_trades',
+      args: [marketId],
+    })
+
+    if (!Array.isArray(raw)) return []
+
+    return raw.map(parseTradeResult)
+  } catch {
+    return []
+  }
+}
+
+export async function getMinFees(): Promise<{ resolution: number; dispute: number }> {
   if (!CONTRACT_ADDRESS) {
-    return { analysis: 1, resolution: 2, dispute: 0.5 }
+    return { resolution: 2, dispute: 0.5 }
   }
 
   const client = createGenLayerClient()
 
-  const [analysisRaw, resolutionRaw, disputeRaw] = await Promise.all([
-    client.readContract({
-      address: CONTRACT_ADDRESS,
-      functionName: 'get_min_analysis_fee',
-      args: [],
-    }),
+  const [resolutionRaw, disputeRaw] = await Promise.all([
     client.readContract({
       address: CONTRACT_ADDRESS,
       functionName: 'get_min_resolution_fee',
@@ -363,10 +374,9 @@ export async function getMinFees(): Promise<{ analysis: number; resolution: numb
   ])
 
   return {
-    analysis: parseU256(analysisRaw) / 1e18,
     resolution: parseU256(resolutionRaw) / 1e18,
     dispute: parseU256(disputeRaw) / 1e18,
   }
 }
 
-export { switchToGenLayerNetwork, switchToBSC }
+export { switchToGenLayerNetwork }

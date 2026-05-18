@@ -19,7 +19,8 @@ export function DisputeModal({ market, resolution, onClose, onDisputed }: Disput
   const { submitDispute, loading, error, txStatus, minFees } = useGenLayer()
 
   const [selectedOutcome, setSelectedOutcome] = useState('')
-  const [evidence, setEvidence] = useState('')
+  const [evidenceUrl, setEvidenceUrl] = useState('')
+  const [reasoning, setReasoning] = useState('')
   const [genAmount, setGenAmount] = useState(minFees.dispute.toString())
   const [step, setStep] = useState<'input' | 'processing' | 'done'>('input')
 
@@ -34,8 +35,13 @@ export function DisputeModal({ market, resolution, onClose, onDisputed }: Disput
       return
     }
 
-    if (!evidence.trim()) {
-      showToast('Please provide evidence for your dispute', 'warning')
+    if (!evidenceUrl.trim()) {
+      showToast('Please provide an evidence URL', 'warning')
+      return
+    }
+
+    if (!reasoning.trim()) {
+      showToast('Please provide reasoning for your dispute', 'warning')
       return
     }
 
@@ -53,7 +59,7 @@ export function DisputeModal({ market, resolution, onClose, onDisputed }: Disput
     setStep('processing')
 
     try {
-      const result = await submitDispute(resolution.id, market.id, market.outcomes, genAmountNum)
+      const result = await submitDispute(resolution.id, market.id, evidenceUrl, reasoning, genAmountNum)
       if (result) {
         onDisputed()
         setStep('done')
@@ -75,7 +81,7 @@ export function DisputeModal({ market, resolution, onClose, onDisputed }: Disput
 
         <div className="modal-body">
           <p className="modal-description">
-            Challenge the current resolution by providing evidence for the correct outcome.
+            Challenge the current resolution by providing evidence and reasoning.
             GenLayer AI will review your dispute and make a final judgment.
           </p>
 
@@ -107,12 +113,23 @@ export function DisputeModal({ market, resolution, onClose, onDisputed }: Disput
               </div>
 
               <div className="dispute-form">
-                <label>Evidence & Reasoning</label>
+                <label>Evidence URL</label>
+                <input
+                  type="url"
+                  className="dispute-url-input"
+                  placeholder="https://example.com/evidence"
+                  value={evidenceUrl}
+                  onChange={(e) => setEvidenceUrl(e.target.value)}
+                />
+              </div>
+
+              <div className="dispute-form">
+                <label>Reasoning</label>
                 <textarea
                   className="dispute-evidence-input"
-                  placeholder="Provide evidence, links, data, or reasoning that supports your proposed outcome..."
-                  value={evidence}
-                  onChange={(e) => setEvidence(e.target.value)}
+                  placeholder="Explain why you believe the resolution is incorrect..."
+                  value={reasoning}
+                  onChange={(e) => setReasoning(e.target.value)}
                   rows={4}
                 />
               </div>
@@ -152,7 +169,7 @@ export function DisputeModal({ market, resolution, onClose, onDisputed }: Disput
                 <button
                   className="btn-pill btn-pill-primary"
                   onClick={handleDispute}
-                  disabled={loading || !selectedOutcome || !evidence.trim()}
+                  disabled={loading || !selectedOutcome || !evidenceUrl.trim() || !reasoning.trim()}
                   style={{ width: '100%', marginTop: '16px' }}
                 >
                   {loading ? 'Submitting Dispute...' : `Submit Dispute for ${parseFloat(genAmount) || 0} GEN`}

@@ -2,6 +2,8 @@ export type MarketStatus = 'active' | 'resolved' | 'closed' | 'disputed'
 
 export type ResolutionStatus = 'pending' | 'resolving' | 'resolved' | 'disputed' | 'finalized'
 
+export type TradeType = 'buy' | 'sell'
+
 export interface Outcome {
   id: string
   name: string
@@ -54,10 +56,10 @@ export interface GenLayerResolution {
   outcomeIndex: number
   confidence: number
   reasoning: string
-  evidence: string[]
   timestamp: string
   txHash: string
   status: ResolutionStatus
+  isFinalized: boolean
 }
 
 export interface Dispute {
@@ -67,17 +69,38 @@ export interface Dispute {
   challenger: string
   proposedOutcome: string
   proposedOutcomeIndex: number
-  evidence: string
+  evidenceUrl: string
   reasoning: string
   status: 'pending' | 'under_review' | 'accepted' | 'rejected'
   timestamp: string
   txHash: string
 }
 
+export interface Position {
+  marketId: string
+  user: string
+  outcomeIndex: number
+  shares: number
+  avgPrice: number
+}
+
+export interface Trade {
+  tradeId: number
+  marketId: string
+  user: string
+  outcomeIndex: number
+  shares: number
+  pricePerShare: number
+  totalCost: number
+  tradeType: TradeType
+  timestamp: string
+}
+
 export interface MarketWithGenLayer extends PolymarketMarket {
   analysis?: GenLayerAnalysis
   resolution?: GenLayerResolution
   disputes?: Dispute[]
+  positions?: Position[]
   hasActiveDispute: boolean
 }
 
@@ -129,10 +152,10 @@ export interface SupabaseResolutionRow {
   outcome_index: number
   confidence: number
   reasoning: string
-  evidence: string[]
   timestamp: string
   tx_hash: string
   status: ResolutionStatus
+  is_finalized: boolean
   created_at: string
 }
 
@@ -143,9 +166,34 @@ export interface SupabaseDisputeRow {
   challenger: string
   proposed_outcome: string
   proposed_outcome_index: number
-  evidence: string
+  evidence_url: string
   reasoning: string
   status: string
+  timestamp: string
+  tx_hash: string
+  created_at: string
+}
+
+export interface SupabasePositionRow {
+  id: number
+  market_id: string
+  user: string
+  outcome_index: number
+  shares: number
+  avg_price: number
+  created_at: string
+  updated_at: string
+}
+
+export interface SupabaseTradeRow {
+  id: number
+  market_id: string
+  user: string
+  outcome_index: number
+  shares: number
+  price_per_share: number
+  total_cost: number
+  trade_type: TradeType
   timestamp: string
   tx_hash: string
   created_at: string
@@ -163,4 +211,16 @@ export function formatVolume(volume: number): string {
   if (volume >= 1_000_000) return `$${(volume / 1_000_000).toFixed(1)}M`
   if (volume >= 1_000) return `$${(volume / 1_000).toFixed(1)}K`
   return `$${volume.toFixed(0)}`
+}
+
+export function formatShares(shares: number): string {
+  if (shares >= 1_000_000) return `${(shares / 1_000_000).toFixed(1)}M`
+  if (shares >= 1_000) return `${(shares / 1_000).toFixed(1)}K`
+  return shares.toFixed(0)
+}
+
+export function formatGenAmount(wei: number): string {
+  const gen = wei / 1e18
+  if (gen >= 1000) return `${(gen / 1000).toFixed(1)}K GEN`
+  return `${gen.toFixed(4)} GEN`
 }

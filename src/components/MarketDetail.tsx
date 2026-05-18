@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useAccount } from 'wagmi'
 import { getMarketById } from '../services/polymarketAPI'
-import { getMarketById as getSupabaseMarket, getAnalysisByMarketId, getResolutionByMarketId } from '../services/supabase'
+import { getMarketById as getSupabaseMarket, getResolutionByMarketId } from '../services/supabase'
 import { useGenLayer } from '../hooks/useGenLayer'
 import { useToast } from '../contexts/ToastContext'
 import { useNetworkState } from '../hooks/useNetworkState'
@@ -10,25 +10,25 @@ import type { PolymarketMarket } from '../types/market'
 import { formatPriceLevel, formatVolume } from '../types/market'
 import { ResolutionModal } from './ResolutionModal'
 import { DisputeModal } from './DisputeModal'
-
-const SENTIMENT_CONFIG: Record<string, { label: string; color: string; icon: string }> = {
-  bullish: { label: 'Bullish', color: '#34c759', icon: '▲' },
-  bearish: { label: 'Bearish', color: '#ff3b30', icon: '▼' },
-  neutral: { label: 'Neutral', color: '#ff9500', icon: '◆' },
-}
-
-const RISK_CONFIG: Record<string, { label: string; color: string }> = {
-  low: { label: 'Low Risk', color: '#34c759' },
-  medium: { label: 'Medium Risk', color: '#ff9500' },
-  high: { label: 'High Risk', color: '#ff3b30' },
-  extreme: { label: 'Extreme Risk', color: '#ff2d55' },
-}
+import { BuyModal } from './BuyModal'
+import { SellModal } from './SellModal'
+import { PositionsPanel } from './PositionsPanel'
 
 function renderMarkdown(text: string): string {
   let html = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
   html = html.replace(/\n/g, '<br>')
   return html
+}
+
+function parseCategory(raw: string): string {
+  if (!raw) return 'Other'
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed.label || parsed.name || raw
+  } catch {
+    return raw
+  }
 }
 
 export function MarketDetail() {
@@ -44,26 +44,19 @@ export function MarketDetail() {
 
   const [showResolutionModal, setShowResolutionModal] = useState(false)
   const [showDisputeModal, setShowDisputeModal] = useState(false)
+  const [showBuyModal, setShowBuyModal] = useState(false)
+  const [showSellModal, setShowSellModal] = useState(false)
 
   const {
-    analysis,
     resolution,
-    loading: genLayerLoading,
-    error: genLayerError,
-    txStatus,
-    minFees,
-    analyze,
-    resolve: resolveMarketFn,
-    reset: resetGenLayer,
+    userPositions,
+    buyShares: buySharesFn,
+    sellShares: sellSharesFn,
+    fetchPositions,
     fetchMinFees,
   } = useGenLayer()
 
-  const [genAmount, setGenAmount] = useState('1.0')
-  const [analysisStep, setAnalysisStep] = useState<'input' | 'processing' | 'result'>('input')
-  const [existingAnalysis, setExistingAnalysis] = useState<ReturnType<typeof useGenLayer>['analysis'] | null>(null)
   const [existingResolution, setExistingResolution] = useState<ReturnType<typeof useGenLayer>['resolution'] | null>(null)
-
-  void resolveMarketFn
 
   useEffect(() => {
     fetchMinFees()
@@ -89,7 +82,7 @@ export function MarketDetail() {
               question: cached.question,
               description: cached.description,
               slug: cached.slug,
-              category: cached.category,
+              category: parseCategory(cached.category),
               tags: cached.tags,
               outcomes: cached.outcomes,
               outcomePrices: cached.outcome_prices,
@@ -113,32 +106,14 @@ export function MarketDetail() {
 
         if (!marketData) {
           marketData = await getMarketById(id)
+          if (marketData) {
+            marketData.category = parseCategory(marketData.category)
+          }
         }
 
         if (cancelled) return
         if (marketData) {
           setMarket(marketData)
-
-          try {
-            const cachedAnalysis = await getAnalysisByMarketId(id)
-            if (cachedAnalysis) {
-              setExistingAnalysis({
-                id: cachedAnalysis.id,
-                marketId: cachedAnalysis.market_id,
-                sentiment: cachedAnalysis.sentiment,
-                confidence: cachedAnalysis.confidence,
-                summary: cachedAnalysis.summary,
-                keyFactors: cachedAnalysis.key_factors,
-                riskLevel: cachedAnalysis.risk_level,
-                recommendedAction: cachedAnalysis.recommended_action,
-                timestamp: cachedAnalysis.timestamp,
-                txHash: cachedAnalysis.tx_hash,
-              })
-              setAnalysisStep('result')
-            }
-          } catch {
-            // no cached analysis
-          }
 
           try {
             const cachedResolution = await getResolutionByMarketId(id)
@@ -150,14 +125,18 @@ export function MarketDetail() {
                 outcomeIndex: cachedResolution.outcome_index,
                 confidence: cachedResolution.confidence,
                 reasoning: cachedResolution.reasoning,
-                evidence: cachedResolution.evidence,
                 timestamp: cachedResolution.timestamp,
                 txHash: cachedResolution.tx_hash,
                 status: cachedResolution.status,
+                isFinalized: cachedResolution.is_finalized,
               })
             }
           } catch {
             // no cached resolution
+          }
+
+          if (isConnected && address) {
+            fetchPositions(id, address)
           }
         } else {
           setError('Market not found')
@@ -172,43 +151,20 @@ export function MarketDetail() {
 
     fetchMarket()
     return () => { cancelled = true }
-  }, [id])
+  }, [id, isConnected, address, fetchPositions])
 
-  const handleAnalyze = async () => {
-    if (!isConnected || !address || !market) {
-      showToast('Please connect your wallet first', 'warning')
-      return
-    }
+  const handleBuy = async (outcomeIndex: number, amountGen: number) => {
+    if (!market || !isConnected || !address) return
+    await buySharesFn(address, market.id, market.question, market.outcomes, market.endDate, outcomeIndex, amountGen)
+    fetchPositions(market.id, address)
+    showToast('Shares purchased!', 'success')
+  }
 
-    const genAmountNum = parseFloat(genAmount) || 0
-    if (genAmountNum <= 0) {
-      showToast('Please enter a valid GEN amount', 'warning')
-      return
-    }
-
-    if (genAmountNum < minFees.analysis) {
-      showToast(`Minimum fee is ${minFees.analysis} GEN`, 'warning')
-      return
-    }
-
-    if (network.current !== 'genlayer') {
-      showToast('Please switch to GenLayer network first', 'warning')
-      return
-    }
-
-    setAnalysisStep('processing')
-
-    try {
-      const result = await analyze(market.question, market.description, market.outcomes, genAmountNum)
-      if (result) {
-        setExistingAnalysis(result)
-        setAnalysisStep('result')
-        showToast('GenLayer analysis complete!', 'success')
-      }
-    } catch {
-      setAnalysisStep('input')
-      showToast('Analysis failed. Check error details.', 'error')
-    }
+  const handleSell = async (outcomeIndex: number, sharesAmount: number) => {
+    if (!market || !isConnected || !address) return
+    await sellSharesFn(address, market.id, outcomeIndex, sharesAmount)
+    fetchPositions(market.id, address)
+    showToast('Shares sold!', 'success')
   }
 
   const handleResolve = async () => {
@@ -221,15 +177,6 @@ export function MarketDetail() {
     setShowDisputeModal(true)
   }
 
-  const handleResetAnalysis = () => {
-    resetGenLayer()
-    setAnalysisStep('input')
-    setExistingAnalysis(null)
-  }
-
-  const sentiment = (existingAnalysis || analysis) ? SENTIMENT_CONFIG[(existingAnalysis || analysis)?.sentiment || 'neutral'] : null
-  const risk = (existingAnalysis || analysis) ? RISK_CONFIG[(existingAnalysis || analysis)?.riskLevel || 'medium'] : null
-  const currentAnalysis = existingAnalysis || analysis
   const currentResolution = existingResolution || resolution
 
   const descriptionHtml = useMemo(() => {
@@ -238,6 +185,10 @@ export function MarketDetail() {
   }, [market?.description])
 
   const isResolved = market?.status === 'resolved' || market?.status === 'closed'
+  const now = Date.now()
+  const endDate = market?.endDate ? new Date(market.endDate).getTime() : null
+  const closeDate = market?.closeDate ? new Date(market.closeDate).getTime() : null
+  const hasPassedDeadline = (endDate && now > endDate) || (closeDate && now > closeDate)
 
   if (loading) {
     return (
@@ -299,12 +250,22 @@ export function MarketDetail() {
             </div>
           )}
 
+          {isConnected && address && userPositions.length > 0 && (
+            <PositionsPanel
+              market={market}
+              positions={userPositions}
+              onSell={() => {
+                setShowSellModal(true)
+              }}
+            />
+          )}
+
           <div className="market-detail-outcomes">
             <h3>Outcomes</h3>
             <div className="outcomes-grid">
               {market.outcomes.map((outcome, index) => {
                 const probability = market.probabilities[index] || 0
-                const isWinner = currentResolution?.outcomeIndex === index && currentResolution.status === 'finalized'
+                const isWinner = currentResolution?.outcomeIndex === index && currentResolution.isFinalized
                 return (
                   <div key={outcome} className={`outcome-card ${isWinner ? 'outcome-winner' : ''}`}>
                     <div className="outcome-card-header">
@@ -322,11 +283,32 @@ export function MarketDetail() {
                         style={{ width: `${probability * 100}%` }}
                       />
                     </div>
+                    {!isResolved && isConnected && network.current === 'genlayer' && (
+                      <button
+                        className="btn-buy-outcome"
+                        onClick={() => setShowBuyModal(true)}
+                      >
+                        Buy
+                      </button>
+                    )}
                   </div>
                 )
               })}
             </div>
           </div>
+
+          {!isResolved && isConnected && network.current === 'genlayer' && (
+            <div className="market-detail-actions">
+              <button className="btn-pill btn-pill-primary" onClick={() => setShowBuyModal(true)}>
+                Buy Shares
+              </button>
+              {userPositions.length > 0 && (
+                <button className="btn-pill btn-pill-secondary" onClick={() => setShowSellModal(true)}>
+                  Sell Shares
+                </button>
+              )}
+            </div>
+          )}
 
           {currentResolution && (
             <div className="market-detail-resolution">
@@ -340,11 +322,11 @@ export function MarketDetail() {
                   <div
                     className="resolution-status-badge"
                     style={{
-                      backgroundColor: currentResolution.status === 'finalized' ? '#34c75915' : '#ff950015',
-                      color: currentResolution.status === 'finalized' ? '#34c759' : '#ff9500',
+                      backgroundColor: currentResolution.isFinalized ? '#34c75915' : '#ff950015',
+                      color: currentResolution.isFinalized ? '#34c759' : '#ff9500',
                     }}
                   >
-                    {currentResolution.status.toUpperCase()}
+                    {currentResolution.isFinalized ? 'FINALIZED' : 'RESOLVED'}
                   </div>
                 </div>
 
@@ -366,20 +348,6 @@ export function MarketDetail() {
                   <p>{currentResolution.reasoning}</p>
                 </div>
 
-                {currentResolution.evidence.length > 0 && (
-                  <div className="result-section">
-                    <h4>Evidence</h4>
-                    <ul className="factor-list">
-                      {currentResolution.evidence.map((ev, idx) => (
-                        <li key={idx}>
-                          <span className="factor-bullet" style={{ color: '#2997ff' }}>●</span>
-                          {ev}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
                 <div className="result-meta">
                   <span className="genlayer-badge">⚡ Resolved by GenLayer AI</span>
                   <span className="timestamp">
@@ -387,7 +355,7 @@ export function MarketDetail() {
                   </span>
                 </div>
 
-                {!isResolved && currentResolution.status !== 'finalized' && isConnected && (
+                {!isResolved && !currentResolution.isFinalized && isConnected && (
                   <div className="resolution-actions">
                     <button className="btn btn-secondary" onClick={handleDispute}>
                       Dispute Resolution
@@ -398,188 +366,7 @@ export function MarketDetail() {
             </div>
           )}
 
-          <div className="market-detail-analysis">
-            <h3>GenLayer AI Analysis</h3>
-
-            {analysisStep === 'input' && !currentAnalysis && (
-              <div className="analysis-input">
-                {!isConnected && (
-                  <div className="analysis-connect-prompt">
-                    <p>Connect your wallet to request an AI-powered market analysis from GenLayer validators.</p>
-                  </div>
-                )}
-
-                {isConnected && network.isChecking && (
-                  <div className="analysis-connect-prompt">
-                    <p>Detecting network...</p>
-                  </div>
-                )}
-
-                {isConnected && !network.isChecking && network.current !== 'genlayer' && (
-                  <div className="analysis-connect-prompt">
-                    <p>Switch to the GenLayer Studio network to submit AI analysis requests.</p>
-                    <button
-                      className="btn-pill btn-pill-primary"
-                      onClick={network.switchToGenLayer}
-                      disabled={network.isSwitching}
-                    >
-                      {network.isSwitching ? 'Switching...' : 'Switch to GenLayer Studio'}
-                    </button>
-                  </div>
-                )}
-
-                {isConnected && !network.isChecking && network.current === 'genlayer' && (
-                  <>
-                    <p className="analysis-intro">
-                      Get an AI-powered analysis of this market from GenLayer validators.
-                      Pay with GEN tokens to fund the consensus process.
-                    </p>
-
-                    <div className="analysis-fee-row">
-                      <label>Analysis Fee</label>
-                      <div className="fee-input-group">
-                        <input
-                          type="number"
-                          min={minFees.analysis.toString()}
-                          step="0.1"
-                          value={genAmount}
-                          onChange={(e) => setGenAmount(e.target.value)}
-                          className="gen-input"
-                        />
-                        <span className="gen-label">GEN</span>
-                      </div>
-                      <span className="fee-hint">Minimum: {minFees.analysis} GEN</span>
-                    </div>
-
-                    {genLayerError && <div className="error-message">{genLayerError}</div>}
-
-                    <button
-                      className="btn-analyze-submit"
-                      onClick={handleAnalyze}
-                      disabled={genLayerLoading}
-                    >
-                      <span className="gen-icon">⚡</span>
-                      {genLayerLoading ? 'Processing...' : `Analyze for ${parseFloat(genAmount) || 0} GEN`}
-                    </button>
-                  </>
-                )}
-              </div>
-            )}
-
-            {analysisStep === 'processing' && (
-              <div className="analysis-loading">
-                <div className="genlayer-spinner">
-                  <div className="spinner-ring"></div>
-                  <div className="spinner-ring"></div>
-                  <div className="spinner-ring"></div>
-                </div>
-                <h4>GenLayer AI Consensus in Progress</h4>
-                <p className="tx-status">{txStatus}</p>
-                <div className="analyze-steps">
-                  <div className="step active">
-                    <span className="step-dot"></span>
-                    <span>Transaction submitted</span>
-                  </div>
-                  <div className="step">
-                    <span className="step-dot"></span>
-                    <span>Leader validator proposes result</span>
-                  </div>
-                  <div className="step">
-                    <span className="step-dot"></span>
-                    <span>Consensus validators verify</span>
-                  </div>
-                  <div className="step">
-                    <span className="step-dot"></span>
-                    <span>Result finalized on-chain</span>
-                  </div>
-                </div>
-                <p className="consensus-hint">
-                  This typically takes 30–90 seconds. We&apos;ll wait up to 10 minutes.
-                </p>
-              </div>
-            )}
-
-            {(analysisStep === 'result' && currentAnalysis && sentiment && risk) && (
-              <div className="analysis-result">
-                <div className="result-header">
-                  <div
-                    className="sentiment-badge"
-                    style={{
-                      backgroundColor: `${sentiment.color}15`,
-                      color: sentiment.color,
-                      border: `1px solid ${sentiment.color}40`,
-                    }}
-                  >
-                    <span className="sentiment-icon">{sentiment.icon}</span>
-                    <span>{sentiment.label}</span>
-                  </div>
-                  <div
-                    className="risk-badge"
-                    style={{
-                      backgroundColor: `${risk.color}15`,
-                      color: risk.color,
-                      border: `1px solid ${risk.color}40`,
-                    }}
-                  >
-                    {risk.label}
-                  </div>
-                </div>
-
-                <div className="confidence-bar">
-                  <div className="confidence-label">
-                    <span>Confidence</span>
-                    <span>{currentAnalysis.confidence}%</span>
-                  </div>
-                  <div className="confidence-track">
-                    <div
-                      className="confidence-fill"
-                      style={{
-                        width: `${currentAnalysis.confidence}%`,
-                        backgroundColor: sentiment.color,
-                      }}
-                    />
-                  </div>
-                </div>
-
-                <div className="result-section">
-                  <h4>Summary</h4>
-                  <p>{currentAnalysis.summary}</p>
-                </div>
-
-                <div className="result-section">
-                  <h4>Key Factors</h4>
-                  <ul className="factor-list">
-                    {currentAnalysis.keyFactors.map((factor, idx) => (
-                      <li key={idx}>
-                        <span className="factor-bullet" style={{ color: sentiment.color }}>●</span>
-                        {factor}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-
-                <div className="result-section recommendation">
-                  <h4>Recommendation</h4>
-                  <p className="recommendation-text">{currentAnalysis.recommendedAction}</p>
-                </div>
-
-                <div className="result-meta">
-                  <span className="genlayer-badge">⚡ Powered by GenLayer AI</span>
-                  <span className="timestamp">
-                    {currentAnalysis.timestamp ? new Date(currentAnalysis.timestamp).toLocaleString() : 'Just now'}
-                  </span>
-                </div>
-
-                <div className="analysis-actions">
-                  <button className="btn btn-secondary" onClick={handleResetAnalysis}>
-                    New Analysis
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {!isResolved && isConnected && network.current === 'genlayer' && (
+          {!isResolved && hasPassedDeadline && isConnected && network.current === 'genlayer' && !currentResolution && (
             <div className="market-detail-actions">
               <button className="btn-pill btn-pill-primary" onClick={handleResolve}>
                 Request Resolution
@@ -610,6 +397,23 @@ export function MarketDetail() {
             setShowDisputeModal(false)
             showToast('Dispute submitted!', 'success')
           }}
+        />
+      )}
+
+      {showBuyModal && market && (
+        <BuyModal
+          market={market}
+          onClose={() => setShowBuyModal(false)}
+          onBuy={handleBuy}
+        />
+      )}
+
+      {showSellModal && market && (
+        <SellModal
+          market={market}
+          positions={userPositions}
+          onClose={() => setShowSellModal(false)}
+          onSell={handleSell}
         />
       )}
     </div>

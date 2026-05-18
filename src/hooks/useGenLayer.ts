@@ -1,35 +1,39 @@
 import { useState, useCallback } from 'react'
 import {
-  analyzeMarket,
+  buyShares,
+  sellShares,
   resolveMarket,
   disputeResolution,
+  getUserPositions,
   getMinFees,
 } from '../services/genlayer'
-import type { GenLayerAnalysis, GenLayerResolution, Dispute } from '../types/market'
+import type { GenLayerResolution, Dispute, Position } from '../types/market'
 
 interface UseGenLayerReturn {
-  analysis: GenLayerAnalysis | null
   resolution: GenLayerResolution | null
   disputeResult: Dispute | null
+  userPositions: Position[]
   loading: boolean
   error: string | null
   txStatus: string | null
-  minFees: { analysis: number; resolution: number; dispute: number }
-  analyze: (question: string, description: string, outcomes: string[], feeGen?: number) => Promise<GenLayerAnalysis | null>
-  resolve: (marketId: string, question: string, description: string, outcomes: string[], feeGen?: number) => Promise<GenLayerResolution | null>
-  submitDispute: (resolutionId: number, marketId: string, outcomes: string[], feeGen?: number) => Promise<Dispute | null>
+  minFees: { resolution: number; dispute: number }
+  buyShares: (account: string, marketId: string, question: string, outcomes: string[], endDate: string, outcomeIndex: number, amountGen: number) => Promise<boolean>
+  sellShares: (account: string, marketId: string, outcomeIndex: number, sharesAmount: number) => Promise<boolean>
+  resolve: (marketId: string, feeGen?: number) => Promise<GenLayerResolution | null>
+  submitDispute: (resolutionId: number, marketId: string, evidenceUrl: string, reasoning: string, feeGen?: number) => Promise<Dispute | null>
+  fetchPositions: (marketId: string, user: string) => Promise<void>
   reset: () => void
   fetchMinFees: () => Promise<void>
 }
 
 export function useGenLayer(): UseGenLayerReturn {
-  const [analysis, setAnalysis] = useState<GenLayerAnalysis | null>(null)
   const [resolution, setResolution] = useState<GenLayerResolution | null>(null)
   const [disputeResult, setDisputeResult] = useState<Dispute | null>(null)
+  const [userPositions, setUserPositions] = useState<Position[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [txStatus, setTxStatus] = useState<string | null>(null)
-  const [minFees, setMinFees] = useState({ analysis: 1, resolution: 2, dispute: 0.5 })
+  const [minFees, setMinFees] = useState({ resolution: 2, dispute: 0.5 })
 
   const fetchMinFees = useCallback(async () => {
     try {
@@ -40,32 +44,28 @@ export function useGenLayer(): UseGenLayerReturn {
     }
   }, [])
 
-  const analyze = useCallback(
-    async (question: string, description: string, outcomes: string[], feeGen?: number) => {
+  const handleBuyShares = useCallback(
+    async (account: string, marketId: string, question: string, outcomes: string[], endDate: string, outcomeIndex: number, amountGen: number) => {
       setLoading(true)
       setError(null)
-      setAnalysis(null)
-      setTxStatus('Submitting analysis...')
+      setTxStatus('Buying shares...')
 
       try {
-        const fee = feeGen || minFees.analysis
-        const result = await analyzeMarket(question, description, outcomes, fee, (stage) => {
+        const result = await buyShares(account, marketId, question, outcomes, endDate, outcomeIndex, amountGen, (stage) => {
           const statusMap: Record<string, string> = {
-            submitted: 'Submitted to GenLayer validators',
-            proposing: 'Leader validator proposing result',
-            verifying: 'Consensus validators verifying',
+            submitted: 'Submitted buy order to GenLayer',
+            proposing: 'Processing transaction',
+            verifying: 'Validating transaction',
             finalizing: 'Finalizing on-chain',
-            completed: 'Result finalized on-chain',
-            fetching_result: 'Fetching result from contract...',
+            completed: 'Shares purchased successfully',
           }
           setTxStatus(statusMap[stage] || stage)
         })
 
-        setAnalysis(result)
-        setTxStatus('Analysis finalized')
+        setTxStatus('Shares purchased')
         return result
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Analysis failed'
+        const message = err instanceof Error ? err.message : 'Buy shares failed'
         setError(message)
         setTxStatus('Failed')
         throw err
@@ -73,11 +73,43 @@ export function useGenLayer(): UseGenLayerReturn {
         setLoading(false)
       }
     },
-    [minFees.analysis]
+    []
   )
 
-  const resolve = useCallback(
-    async (marketId: string, question: string, description: string, outcomes: string[], feeGen?: number) => {
+  const handleSellShares = useCallback(
+    async (account: string, marketId: string, outcomeIndex: number, sharesAmount: number) => {
+      setLoading(true)
+      setError(null)
+      setTxStatus('Selling shares...')
+
+      try {
+        const result = await sellShares(account, marketId, outcomeIndex, sharesAmount, (stage) => {
+          const statusMap: Record<string, string> = {
+            submitted: 'Submitted sell order to GenLayer',
+            proposing: 'Processing transaction',
+            verifying: 'Validating transaction',
+            finalizing: 'Finalizing on-chain',
+            completed: 'Shares sold successfully',
+          }
+          setTxStatus(statusMap[stage] || stage)
+        })
+
+        setTxStatus('Shares sold')
+        return result
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Sell shares failed'
+        setError(message)
+        setTxStatus('Failed')
+        throw err
+      } finally {
+        setLoading(false)
+      }
+    },
+    []
+  )
+
+  const handleResolve = useCallback(
+    async (marketId: string, feeGen?: number) => {
       setLoading(true)
       setError(null)
       setResolution(null)
@@ -85,11 +117,11 @@ export function useGenLayer(): UseGenLayerReturn {
 
       try {
         const fee = feeGen || minFees.resolution
-        const result = await resolveMarket(marketId, question, description, outcomes, fee, (stage) => {
+        const result = await resolveMarket(marketId, fee, (stage) => {
           const statusMap: Record<string, string> = {
             submitted: 'Submitted resolution to GenLayer',
-            proposing: 'Leader resolver evaluating evidence',
-            verifying: 'Consensus validators verifying resolution',
+            proposing: 'AI evaluating evidence',
+            verifying: 'Consensus validators verifying',
             finalizing: 'Finalizing resolution on-chain',
             completed: 'Resolution finalized on-chain',
             fetching_result: 'Fetching resolution from contract...',
@@ -112,8 +144,8 @@ export function useGenLayer(): UseGenLayerReturn {
     [minFees.resolution]
   )
 
-  const submitDispute = useCallback(
-    async (resolutionId: number, marketId: string, outcomes: string[], feeGen?: number) => {
+  const handleSubmitDispute = useCallback(
+    async (resolutionId: number, marketId: string, evidenceUrl: string, reasoning: string, feeGen?: number) => {
       setLoading(true)
       setError(null)
       setDisputeResult(null)
@@ -121,7 +153,7 @@ export function useGenLayer(): UseGenLayerReturn {
 
       try {
         const fee = feeGen || minFees.dispute
-        const result = await disputeResolution(resolutionId, marketId, outcomes, fee, (stage) => {
+        const result = await disputeResolution(resolutionId, marketId, evidenceUrl, reasoning, fee, (stage) => {
           const statusMap: Record<string, string> = {
             submitted: 'Submitted dispute to GenLayer',
             proposing: 'AI reviewing dispute evidence',
@@ -148,26 +180,37 @@ export function useGenLayer(): UseGenLayerReturn {
     [minFees.dispute]
   )
 
+  const fetchPositions = useCallback(async (marketId: string, user: string) => {
+    try {
+      const positions = await getUserPositions(marketId, user)
+      setUserPositions(positions)
+    } catch (err) {
+      console.error('Failed to fetch positions:', err)
+    }
+  }, [])
+
   const reset = useCallback(() => {
-    setAnalysis(null)
     setResolution(null)
     setDisputeResult(null)
+    setUserPositions([])
     setError(null)
     setLoading(false)
     setTxStatus(null)
   }, [])
 
   return {
-    analysis,
     resolution,
     disputeResult,
+    userPositions,
     loading,
     error,
     txStatus,
     minFees,
-    analyze,
-    resolve,
-    submitDispute,
+    buyShares: handleBuyShares,
+    sellShares: handleSellShares,
+    resolve: handleResolve,
+    submitDispute: handleSubmitDispute,
+    fetchPositions,
     reset,
     fetchMinFees,
   }

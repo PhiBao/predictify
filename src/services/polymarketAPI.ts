@@ -25,9 +25,33 @@ function mapStatus(raw: string): MarketStatus {
 }
 
 function parsePolymarketMarket(raw: Record<string, unknown>): PolymarketMarket {
-  const outcomes = (raw.outcomes as string[]) || []
-  const outcomePrices = (raw.outcomePrices as string[]) || []
-  const probabilities = outcomePrices.map((p) => parseFloat(p))
+  let outcomes: string[] = []
+  if (Array.isArray(raw.outcomes)) {
+    outcomes = raw.outcomes as string[]
+  } else if (typeof raw.outcomes === 'string') {
+    try { outcomes = JSON.parse(raw.outcomes) } catch { outcomes = [raw.outcomes] }
+  }
+
+  let outcomePricesRaw: string[] = []
+  if (Array.isArray(raw.outcomePrices)) {
+    outcomePricesRaw = raw.outcomePrices as string[]
+  } else if (typeof raw.outcomePrices === 'string') {
+    try { outcomePricesRaw = JSON.parse(raw.outcomePrices) } catch { outcomePricesRaw = [raw.outcomePrices] }
+  }
+
+  const probabilities = outcomePricesRaw.map((p) => parseFloat(String(p)))
+
+  let category = 'Other'
+  if (typeof raw.category === 'string') {
+    try {
+      const parsed = JSON.parse(raw.category)
+      category = parsed.label || parsed.name || raw.category
+    } catch {
+      category = raw.category
+    }
+  } else if (typeof raw.category === 'object' && raw.category !== null) {
+    category = (raw.category as { label?: string }).label || 'Other'
+  }
 
   return {
     id: (raw.id as string) || '',
@@ -35,10 +59,10 @@ function parsePolymarketMarket(raw: Record<string, unknown>): PolymarketMarket {
     question: (raw.question as string) || '',
     description: (raw.description as string) || '',
     slug: (raw.slug as string) || '',
-    category: (raw.category as string) || 'Other',
+    category,
     tags: (raw.tags as string[]) || [],
     outcomes,
-    outcomePrices,
+    outcomePrices: outcomePricesRaw,
     probabilities,
     volume: parseFloat(String(raw.volume || 0)),
     volume24h: parseFloat(String(raw.volume_24h || 0)),
