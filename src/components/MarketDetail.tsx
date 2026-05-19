@@ -7,12 +7,10 @@ import { useGenLayer } from '../hooks/useGenLayer'
 import { useToast } from '../contexts/ToastContext'
 import { useNetworkState } from '../hooks/useNetworkState'
 import type { PolymarketMarket } from '../types/market'
-import { formatPriceLevel, formatVolume } from '../types/market'
+import { formatVolume, formatGen } from '../types/market'
 import { ResolutionModal } from './ResolutionModal'
 import { DisputeModal } from './DisputeModal'
-import { BuyModal } from './BuyModal'
-import { SellModal } from './SellModal'
-import { PositionsPanel } from './PositionsPanel'
+import { StakeModal } from './StakeModal'
 
 function renderMarkdown(text: string): string {
   let html = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
@@ -44,15 +42,16 @@ export function MarketDetail() {
 
   const [showResolutionModal, setShowResolutionModal] = useState(false)
   const [showDisputeModal, setShowDisputeModal] = useState(false)
-  const [showBuyModal, setShowBuyModal] = useState(false)
-  const [showSellModal, setShowSellModal] = useState(false)
+  const [showStakeModal, setShowStakeModal] = useState(false)
+  const [stakeOutcomeIndex, setStakeOutcomeIndex] = useState(0)
 
   const {
     resolution,
-    userPositions,
-    buyShares: buySharesFn,
-    sellShares: sellSharesFn,
-    fetchPositions,
+    userStakes,
+    pools,
+    stakeOnOutcome,
+    claimWinnings,
+    fetchStakesAndPools,
     fetchMinFees,
   } = useGenLayer()
 
@@ -136,7 +135,7 @@ export function MarketDetail() {
           }
 
           if (isConnected && address) {
-            fetchPositions(id, address)
+            fetchStakesAndPools(id, address)
           }
         } else {
           setError('Market not found')
@@ -151,20 +150,31 @@ export function MarketDetail() {
 
     fetchMarket()
     return () => { cancelled = true }
-  }, [id, isConnected, address, fetchPositions])
+  }, [id, isConnected, address, fetchStakesAndPools])
 
-  const handleBuy = async (outcomeIndex: number, amountGen: number) => {
-    if (!market || !isConnected || !address) return
-    await buySharesFn(address, market.id, market.question, market.outcomes, market.endDate, outcomeIndex, amountGen)
-    fetchPositions(market.id, address)
-    showToast('Shares purchased!', 'success')
+  const handleStake = async (_marketId: string, _question: string, _outcomes: string[], _endDate: string, outcomeIndex: number, amountGen: number) => {
+    if (!market || !isConnected || !address) return false
+    try {
+      await stakeOnOutcome(address, market.id, market.question, market.outcomes, market.endDate, outcomeIndex, amountGen)
+      fetchStakesAndPools(market.id, address)
+      showToast('Stake placed!', 'success')
+      setShowStakeModal(false)
+      return true
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Stake failed', 'error')
+      return false
+    }
   }
 
-  const handleSell = async (outcomeIndex: number, sharesAmount: number) => {
+  const handleClaim = async (outcomeIndex: number) => {
     if (!market || !isConnected || !address) return
-    await sellSharesFn(address, market.id, outcomeIndex, sharesAmount)
-    fetchPositions(market.id, address)
-    showToast('Shares sold!', 'success')
+    await claimWinnings(address, market.id, outcomeIndex)
+    showToast('Winnings claimed!', 'success')
+  }
+
+  const openStakeModal = (outcomeIndex: number) => {
+    setStakeOutcomeIndex(outcomeIndex)
+    setShowStakeModal(true)
   }
 
   const handleResolve = async () => {
@@ -185,10 +195,35 @@ export function MarketDetail() {
   }, [market?.description])
 
   const isResolved = market?.status === 'resolved' || market?.status === 'closed'
-  const now = Date.now()
-  const endDate = market?.endDate ? new Date(market.endDate).getTime() : null
-  const closeDate = market?.closeDate ? new Date(market.closeDate).getTime() : null
-  const hasPassedDeadline = (endDate && now > endDate) || (closeDate && now > closeDate)
+
+  const totalPool = pools.reduce((sum, p) => sum + p.amount, 0)
+
+  const deadline = market?.endDate || market?.closeDate
+  const deadlineDate = deadline ? new Date(deadline) : null
+  const now = new Date()
+  const isExpired = deadlineDate ? now > deadlineDate : false
+  const daysLeft = deadlineDate ? Math.max(0, Math.ceil((deadlineDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24))) : null
+  const deadlineText = deadlineDate
+    ? isExpired
+      ? 'Market has ended'
+      : daysLeft === 0
+        ? 'Ends today'
+        : daysLeft === 1
+          ? 'Ends tomorrow'
+          : `${daysLeft} days left`
+    : 'No deadline set'
+
+  const hasPassedDeadline = isExpired
+
+  const getPoolPercentage = (outcomeIndex: number) => {
+    const pool = pools.find((p) => p.outcomeIndex === outcomeIndex)
+    const poolAmount = pool?.amount ?? 0
+    if (totalPool === 0 || !market) return 100 / (market?.outcomes.length || 2)
+    return (poolAmount / totalPool) * 100
+  }
+
+  const userTotalStake = userStakes.reduce((sum, s) => sum + s.amount, 0)
+  const userWinningStake = userStakes.find((s) => currentResolution && s.outcomeIndex === currentResolution.outcomeIndex)
 
   if (loading) {
     return (
@@ -235,7 +270,10 @@ export function MarketDetail() {
               <h1 className="market-detail-title">{market.question}</h1>
               <div className="market-detail-meta">
                 <span>Volume: {formatVolume(market.volume)}</span>
-                <span>Liquidity: {formatVolume(market.liquidity)}</span>
+                <span>Pool: {formatGen(totalPool)}</span>
+                <span className={`market-detail-deadline ${isExpired ? 'expired' : ''}`}>
+                  {deadlineText}
+                </span>
               </div>
             </div>
           </div>
@@ -250,65 +288,77 @@ export function MarketDetail() {
             </div>
           )}
 
-          {isConnected && address && userPositions.length > 0 && (
-            <PositionsPanel
-              market={market}
-              positions={userPositions}
-              onSell={() => {
-                setShowSellModal(true)
-              }}
-            />
+          {isConnected && address && userTotalStake > 0 && (
+            <div className="stake-user-summary">
+              <h3>Your Stakes</h3>
+              <div className="stake-summary-row">
+                <span>Total staked</span>
+                <span>{formatGen(userTotalStake)}</span>
+              </div>
+              {currentResolution && userWinningStake && (
+                <button className="btn-claim" onClick={() => handleClaim(userWinningStake.outcomeIndex)}>
+                  Claim Winnings
+                </button>
+              )}
+            </div>
           )}
 
           <div className="market-detail-outcomes">
             <h3>Outcomes</h3>
+            <div className="market-unified-bar-detail">
+              {market.outcomes.map((outcome, index) => {
+                const percentage = getPoolPercentage(index)
+                return (
+                  <div
+                    key={outcome}
+                    className="market-unified-segment-detail"
+                    style={{ width: `${percentage}%` }}
+                  >
+                    <span className="market-unified-label-detail">{outcome}</span>
+                    <span className="market-unified-percent-detail">{percentage.toFixed(1)}%</span>
+                  </div>
+                )
+              })}
+            </div>
+
             <div className="outcomes-grid">
               {market.outcomes.map((outcome, index) => {
-                const probability = market.probabilities[index] || 0
+                const percentage = getPoolPercentage(index)
                 const isWinner = currentResolution?.outcomeIndex === index && currentResolution.isFinalized
+                const userStakeOnOutcome = userStakes.find((s) => s.outcomeIndex === index)
                 return (
-                  <div key={outcome} className={`outcome-card ${isWinner ? 'outcome-winner' : ''}`}>
+                  <div
+                    key={outcome}
+                    className={`outcome-card ${isWinner ? 'outcome-winner' : ''} ${!isResolved && isConnected && network.current === 'genlayer' ? 'outcome-card-clickable' : ''}`}
+                    onClick={() => !isResolved && isConnected && network.current === 'genlayer' && openStakeModal(index)}
+                  >
                     <div className="outcome-card-header">
                       <span className="outcome-card-name">{outcome}</span>
                       {isWinner && <span className="outcome-winner-badge">WINNER</span>}
                     </div>
-                    <div className="outcome-card-prices">
-                      <span className="outcome-price probability">
-                        {formatPriceLevel(probability)}
-                      </span>
-                    </div>
-                    <div className="outcome-probability-bar">
+                    <div className="outcome-pool-bar">
                       <div
-                        className="outcome-probability-fill"
-                        style={{ width: `${probability * 100}%` }}
+                        className="outcome-pool-fill"
+                        style={{ width: `${percentage}%` }}
                       />
                     </div>
+                    <div className="outcome-pool-stats">
+                      <span>{percentage.toFixed(1)}%</span>
+                      <span>{formatGen(pools.find((p) => p.outcomeIndex === index)?.amount ?? 0)}</span>
+                    </div>
+                    {userStakeOnOutcome && (
+                      <div className="outcome-user-stake">
+                        Your stake: {formatGen(userStakeOnOutcome.amount)}
+                      </div>
+                    )}
                     {!isResolved && isConnected && network.current === 'genlayer' && (
-                      <button
-                        className="btn-buy-outcome"
-                        onClick={() => setShowBuyModal(true)}
-                      >
-                        Buy
-                      </button>
+                      <span className="outcome-stake-hint">Click to stake →</span>
                     )}
                   </div>
                 )
               })}
             </div>
           </div>
-
-          {!isResolved && isConnected && network.current === 'genlayer' && (
-            <div className="market-detail-actions">
-              <button className="btn-pill btn-pill-primary" onClick={() => setShowBuyModal(true)}>
-                Buy Shares
-              </button>
-              {userPositions.length > 0 && (
-                <button className="btn-pill btn-pill-secondary" onClick={() => setShowSellModal(true)}>
-                  Sell Shares
-                </button>
-              )}
-            </div>
-          )}
 
           {currentResolution && (
             <div className="market-detail-resolution">
@@ -400,20 +450,17 @@ export function MarketDetail() {
         />
       )}
 
-      {showBuyModal && market && (
-        <BuyModal
-          market={market}
-          onClose={() => setShowBuyModal(false)}
-          onBuy={handleBuy}
-        />
-      )}
-
-      {showSellModal && market && (
-        <SellModal
-          market={market}
-          positions={userPositions}
-          onClose={() => setShowSellModal(false)}
-          onSell={handleSell}
+      {showStakeModal && market && (
+        <StakeModal
+          isOpen={showStakeModal}
+          onClose={() => setShowStakeModal(false)}
+          marketId={market.id}
+          question={market.question}
+          outcomes={market.outcomes}
+          endDate={market.endDate || ''}
+          defaultOutcomeIndex={stakeOutcomeIndex}
+          onStake={handleStake}
+          loading={loading}
         />
       )}
     </div>

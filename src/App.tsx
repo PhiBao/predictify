@@ -5,6 +5,7 @@ import { MarketsList } from './components/MarketsList'
 import { MarketDetail } from './components/MarketDetail'
 import { MarketGroupDetail } from './components/MarketGroupDetail'
 import { AdminPage } from './components/AdminPage'
+import { PortfolioPage } from './components/PortfolioPage'
 import { ToastProvider } from './contexts/ToastContext'
 import { ScrollToTop } from './components/ScrollToTop'
 import { useNetworkState } from './hooks/useNetworkState'
@@ -107,6 +108,7 @@ function App() {
             </a>
           <div className="nav-links">
             <a href="/" className="nav-link">Markets</a>
+            {isConnected && <a href="/portfolio" className="nav-link">Portfolio</a>}
             {isAdmin && <a href="/admin" className="nav-link">Admin</a>}
           </div>
             <div className="nav-actions">
@@ -120,6 +122,7 @@ function App() {
 
         <Routes>
           <Route path="/" element={<HomePage />} />
+          <Route path="/portfolio" element={<PortfolioPage />} />
           <Route path="/market/:id" element={<MarketDetail />} />
           <Route path="/market/group/:slug" element={<MarketGroupDetail />} />
           <Route path="/admin" element={<AdminPage />} />

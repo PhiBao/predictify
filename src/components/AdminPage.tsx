@@ -2,11 +2,13 @@ import { useState, useCallback } from 'react'
 import { useAccount } from 'wagmi'
 import { useNavigate } from 'react-router-dom'
 import { useToast } from '../contexts/ToastContext'
-import { getActiveMarkets } from '../services/polymarketAPI'
+import { getActiveMarkets, getTrendingMarkets, getClosingSoonMarkets } from '../services/polymarketAPI'
 import { upsertMarkets, getLastSyncTime, updateLastSyncTime, getMarkets as getSupabaseMarkets } from '../services/supabase'
 import type { SupabaseMarketRow } from '../types/market'
 
 const ADMIN_ADDRESS = (import.meta.env.VITE_ADMIN_ADDRESS || '').trim().toLowerCase()
+
+type SyncMode = 'active' | 'trending' | 'closing-soon' | 'all'
 
 interface SyncStats {
   total: number
@@ -23,6 +25,7 @@ export function AdminPage() {
 
   const [syncing, setSyncing] = useState(false)
   const [syncProgress, setSyncProgress] = useState('')
+  const [syncMode, setSyncMode] = useState<SyncMode>('active')
   const [stats, setStats] = useState<SyncStats | null>(null)
   const [loadingStats, setLoadingStats] = useState(false)
 
@@ -61,60 +64,70 @@ export function AdminPage() {
     }
 
     setSyncing(true)
-    setSyncProgress('Fetching active markets from Polymarket...')
+    setSyncProgress('Fetching markets from Polymarket...')
 
     try {
-      const batches = []
-      let offset = 0
-      const limit = 50
+      let allMarkets: Awaited<ReturnType<typeof getActiveMarkets>>
 
-      while (true) {
-        setSyncProgress(`Fetching batch ${Math.floor(offset / limit) + 1}...`)
-        const markets = await getActiveMarkets({ limit, offset, closed: false })
-        if (markets.length === 0) break
-
-        const rows: SupabaseMarketRow[] = markets.map((m) => ({
-          id: m.id,
-          condition_id: m.conditionId,
-          question: m.question,
-          description: m.description,
-          slug: m.slug,
-          category: m.category,
-          tags: m.tags,
-          outcomes: m.outcomes,
-          outcome_prices: m.outcomePrices,
-          probabilities: m.probabilities,
-          volume: m.volume,
-          volume_24h: m.volume24h,
-          liquidity: m.liquidity,
-          status: m.status,
-          close_date: m.closeDate,
-          end_date: m.endDate,
-          image: m.image,
-          icon: m.icon,
-          resolution_source: m.resolutionSource,
-          group_slug: m.groupSlug || null,
-          group_name: m.groupName || null,
-          last_synced: new Date().toISOString(),
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        }))
-
-        batches.push(rows)
-        offset += limit
-
-        if (markets.length < limit) break
+      switch (syncMode) {
+        case 'trending':
+          setSyncProgress('Fetching trending markets...')
+          allMarkets = await getTrendingMarkets(200)
+          break
+        case 'closing-soon':
+          setSyncProgress('Fetching closing soon markets...')
+          allMarkets = await getClosingSoonMarkets(200)
+          break
+        case 'all':
+          setSyncProgress('Fetching all markets...')
+          allMarkets = await fetchAllMarkets()
+          break
+        default:
+          setSyncProgress('Fetching active markets...')
+          allMarkets = await fetchAllMarkets()
       }
 
-      setSyncProgress(`Syncing ${batches.reduce((sum, b) => sum + b.length, 0)} markets to Supabase...`)
+      setSyncProgress(`Processing ${allMarkets.length} markets...`)
 
-      for (const batch of batches) {
+      const rows: SupabaseMarketRow[] = allMarkets.map((m) => ({
+        id: m.id,
+        condition_id: m.conditionId,
+        question: m.question,
+        description: m.description,
+        slug: m.slug,
+        category: typeof m.category === 'string' ? m.category : JSON.stringify(m.category),
+        tags: m.tags,
+        outcomes: m.outcomes,
+        outcome_prices: m.outcomePrices,
+        probabilities: m.probabilities,
+        volume: m.volume,
+        volume_24h: m.volume24h,
+        liquidity: m.liquidity,
+        status: m.status,
+        close_date: m.closeDate,
+        end_date: m.endDate,
+        image: m.image,
+        icon: m.icon,
+        resolution_source: m.resolutionSource,
+        group_slug: m.groupSlug || null,
+        group_name: m.groupName || null,
+        last_synced: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }))
+
+      setSyncProgress(`Upserting ${rows.length} markets to Supabase...`)
+
+      const batchSize = 50
+      for (let i = 0; i < rows.length; i += batchSize) {
+        const batch = rows.slice(i, i + batchSize)
         await upsertMarkets(batch)
+        setSyncProgress(`Upserting batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(rows.length / batchSize)}...`)
       }
 
       await updateLastSyncTime(new Date().toISOString())
 
-      showToast(`Successfully synced ${batches.reduce((sum, b) => sum + b.length, 0)} markets`, 'success')
+      showToast(`Successfully synced ${rows.length} markets`, 'success')
       loadStats()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Sync failed', 'error')
@@ -122,38 +135,7 @@ export function AdminPage() {
       setSyncing(false)
       setSyncProgress('')
     }
-  }, [isAdmin, showToast, loadStats])
-
-  if (!isConnected) {
-    return (
-      <div className="admin-page">
-        <div className="admin-content">
-          <button className="back-link" onClick={() => navigate('/')}>← Back</button>
-          <div className="admin-empty">
-            <h2>Admin Panel</h2>
-            <p>Connect your wallet to access the admin panel.</p>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  if (!isAdmin) {
-    return (
-      <div className="admin-page">
-        <div className="admin-content">
-          <button className="back-link" onClick={() => navigate('/')}>← Back</button>
-          <div className="admin-empty">
-            <h2>Access Denied</h2>
-            <p>Only the admin wallet can access this page.</p>
-            <p className="admin-address">Connected: {address}</p>
-            <p className="admin-address">Expected: {ADMIN_ADDRESS || '(not set in .env)'}</p>
-            {!ADMIN_ADDRESS && <p className="admin-address" style={{ color: '#ff3b30' }}>Set VITE_ADMIN_ADDRESS in your .env file</p>}
-          </div>
-        </div>
-      </div>
-    )
-  }
+  }, [isAdmin, showToast, loadStats, syncMode])
 
   return (
     <div className="admin-page">
@@ -189,13 +171,49 @@ export function AdminPage() {
           </div>
         )}
 
+        <div className="admin-sync-options">
+          <h3>Sync Mode</h3>
+          <div className="sync-mode-buttons">
+            <button
+              className={`sync-mode-btn ${syncMode === 'active' ? 'active' : ''}`}
+              onClick={() => setSyncMode('active')}
+            >
+              Active Markets
+            </button>
+            <button
+              className={`sync-mode-btn ${syncMode === 'trending' ? 'active' : ''}`}
+              onClick={() => setSyncMode('trending')}
+            >
+              Trending
+            </button>
+            <button
+              className={`sync-mode-btn ${syncMode === 'closing-soon' ? 'active' : ''}`}
+              onClick={() => setSyncMode('closing-soon')}
+            >
+              Closing Soon
+            </button>
+            <button
+              className={`sync-mode-btn ${syncMode === 'all' ? 'active' : ''}`}
+              onClick={() => setSyncMode('all')}
+            >
+              All Markets
+            </button>
+          </div>
+          <p className="sync-mode-hint">
+            {syncMode === 'active' && 'Fetches all active markets from Polymarket'}
+            {syncMode === 'trending' && 'Fetches top 200 trending markets by volume'}
+            {syncMode === 'closing-soon' && 'Fetches markets closing within 24 hours'}
+            {syncMode === 'all' && 'Fetches all markets (active + closed) - may take longer'}
+          </p>
+        </div>
+
         <div className="admin-actions">
           <button
             className="btn-sync"
             onClick={handleSync}
             disabled={syncing}
           >
-            {syncing ? 'Syncing...' : 'Sync Markets from Polymarket'}
+            {syncing ? 'Syncing...' : `Sync ${syncMode === 'all' ? 'All' : syncMode === 'trending' ? 'Trending' : syncMode === 'closing-soon' ? 'Closing Soon' : 'Active'} Markets`}
           </button>
 
           <button
@@ -216,4 +234,22 @@ export function AdminPage() {
       </div>
     </div>
   )
+}
+
+async function fetchAllMarkets() {
+  const markets: Awaited<ReturnType<typeof getActiveMarkets>> = []
+  let offset = 0
+  const limit = 50
+
+  while (true) {
+    const batch = await getActiveMarkets({ limit, offset, closed: false })
+    if (batch.length === 0) break
+
+    markets.push(...batch)
+    offset += limit
+
+    if (batch.length < limit) break
+  }
+
+  return markets
 }

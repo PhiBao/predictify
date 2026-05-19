@@ -1,11 +1,9 @@
 import { createClient } from '@supabase/supabase-js'
 import type {
   SupabaseMarketRow,
-  SupabaseAnalysisRow,
   SupabaseResolutionRow,
   SupabaseDisputeRow,
-  SupabasePositionRow,
-  SupabaseTradeRow,
+  SupabaseStakeRow,
   MarketStatus,
   ResolutionStatus,
 } from '../types/market'
@@ -42,6 +40,7 @@ export async function getMarkets(options?: {
   limit?: number
   offset?: number
   search?: string
+  orderBy?: 'volume' | 'end_date' | 'volume_24h'
 }): Promise<SupabaseMarketRow[]> {
   let query = supabase.from('markets').select('*')
 
@@ -55,7 +54,9 @@ export async function getMarkets(options?: {
     query = query.or(`question.ilike.%${options.search}%,description.ilike.%${options.search}%`)
   }
 
-  query = query.order('volume', { ascending: false })
+  const orderBy = options?.orderBy || 'volume'
+  const ascending = orderBy === 'end_date'
+  query = query.order(orderBy, { ascending })
 
   if (options?.limit) {
     query = query.limit(options.limit)
@@ -87,28 +88,6 @@ export async function getMarketsByGroupSlug(slug: string): Promise<SupabaseMarke
     .order('volume', { ascending: false })
   if (error) throw new Error(`Failed to fetch group markets: ${error.message}`)
   return data || []
-}
-
-export async function insertAnalysis(analysis: Omit<SupabaseAnalysisRow, 'created_at'>): Promise<number> {
-  const { data, error } = await supabase
-    .from('analyses')
-    .insert(analysis)
-    .select('id')
-    .single()
-  if (error) throw new Error(`Failed to insert analysis: ${error.message}`)
-  return data.id
-}
-
-export async function getAnalysisByMarketId(marketId: string): Promise<SupabaseAnalysisRow | null> {
-  const { data, error } = await supabase
-    .from('analyses')
-    .select('*')
-    .eq('market_id', marketId)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  if (error) throw new Error(`Failed to fetch analysis: ${error.message}`)
-  return data
 }
 
 export async function insertResolution(resolution: Omit<SupabaseResolutionRow, 'created_at'>): Promise<number> {
@@ -179,63 +158,31 @@ export async function updateDisputeStatus(id: number, status: string): Promise<v
   if (error) throw new Error(`Failed to update dispute: ${error.message}`)
 }
 
-export async function upsertPosition(position: Omit<SupabasePositionRow, 'created_at' | 'updated_at'>): Promise<void> {
+export async function upsertStake(stake: Omit<SupabaseStakeRow, 'created_at'>): Promise<void> {
   const { error } = await supabase
-    .from('positions')
-    .upsert(position, { onConflict: 'market_id,user,outcome_index' })
-  if (error) throw new Error(`Failed to upsert position: ${error.message}`)
+    .from('stakes')
+    .upsert(stake, { onConflict: 'market_id,user,outcome_index' })
+  if (error) throw new Error(`Failed to upsert stake: ${error.message}`)
 }
 
-export async function getUserPositions(marketId: string, user: string): Promise<SupabasePositionRow[]> {
+export async function getUserStakes(marketId: string, user: string): Promise<SupabaseStakeRow[]> {
   const { data, error } = await supabase
-    .from('positions')
+    .from('stakes')
     .select('*')
     .eq('market_id', marketId)
     .eq('user', user)
-    .gt('shares', 0)
-  if (error) throw new Error(`Failed to fetch positions: ${error.message}`)
+    .gt('amount', 0)
+  if (error) throw new Error(`Failed to fetch stakes: ${error.message}`)
   return data || []
 }
 
-export async function getAllUserPositions(user: string): Promise<SupabasePositionRow[]> {
+export async function getAllUserStakes(user: string): Promise<SupabaseStakeRow[]> {
   const { data, error } = await supabase
-    .from('positions')
+    .from('stakes')
     .select('*')
     .eq('user', user)
-    .gt('shares', 0)
-  if (error) throw new Error(`Failed to fetch positions: ${error.message}`)
-  return data || []
-}
-
-export async function insertTrade(trade: Omit<SupabaseTradeRow, 'created_at'>): Promise<number> {
-  const { data, error } = await supabase
-    .from('trades')
-    .insert(trade)
-    .select('id')
-    .single()
-  if (error) throw new Error(`Failed to insert trade: ${error.message}`)
-  return data.id
-}
-
-export async function getMarketTrades(marketId: string): Promise<SupabaseTradeRow[]> {
-  const { data, error } = await supabase
-    .from('trades')
-    .select('*')
-    .eq('market_id', marketId)
-    .order('created_at', { ascending: false })
-    .limit(50)
-  if (error) throw new Error(`Failed to fetch trades: ${error.message}`)
-  return data || []
-}
-
-export async function getUserTrades(marketId: string, user: string): Promise<SupabaseTradeRow[]> {
-  const { data, error } = await supabase
-    .from('trades')
-    .select('*')
-    .eq('market_id', marketId)
-    .eq('user', user)
-    .order('created_at', { ascending: false })
-  if (error) throw new Error(`Failed to fetch trades: ${error.message}`)
+    .gt('amount', 0)
+  if (error) throw new Error(`Failed to fetch stakes: ${error.message}`)
   return data || []
 }
 
@@ -253,4 +200,57 @@ export async function updateLastSyncTime(timestamp: string): Promise<void> {
     .from('sync_metadata')
     .upsert({ id: 1, last_sync: timestamp }, { onConflict: 'id' })
   if (error) throw new Error(`Failed to update sync time: ${error.message}`)
+}
+
+export interface MarketPoolRow {
+  market_id: string
+  pools_json: string
+  total_staked: number
+  updated_at: string
+}
+
+export async function upsertMarketPools(marketId: string, pools: { outcomeIndex: number; amount: number }[]): Promise<void> {
+  const totalStaked = pools.reduce((sum, p) => sum + p.amount, 0)
+  const { error } = await supabase
+    .from('market_pools')
+    .upsert({
+      market_id: marketId,
+      pools_json: JSON.stringify(pools),
+      total_staked: totalStaked,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'market_id' })
+  if (error) throw new Error(`Failed to upsert market pools: ${error.message}`)
+}
+
+export async function getMarketPools(marketId: string): Promise<{ outcomeIndex: number; amount: number }[]> {
+  const { data, error } = await supabase
+    .from('market_pools')
+    .select('pools_json')
+    .eq('market_id', marketId)
+    .single()
+  if (error) return []
+  try {
+    return JSON.parse(data.pools_json)
+  } catch {
+    return []
+  }
+}
+
+export async function getAllMarketPools(marketIds: string[]): Promise<Record<string, { outcomeIndex: number; amount: number }[]>> {
+  if (marketIds.length === 0) return {}
+  const { data, error } = await supabase
+    .from('market_pools')
+    .select('market_id, pools_json')
+    .in('market_id', marketIds)
+  if (error) return {}
+
+  const result: Record<string, { outcomeIndex: number; amount: number }[]> = {}
+  for (const row of data || []) {
+    try {
+      result[row.market_id] = JSON.parse(row.pools_json)
+    } catch {
+      // skip invalid
+    }
+  }
+  return result
 }

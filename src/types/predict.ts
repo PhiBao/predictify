@@ -1,13 +1,15 @@
 export {
   formatPriceLevel,
   formatVolume,
+  formatGen,
   type MarketStatus,
   type ResolutionStatus,
   type Outcome,
   type PolymarketMarket,
-  type GenLayerAnalysis,
   type GenLayerResolution,
   type Dispute,
+  type Stake,
+  type PoolEntry,
   type MarketWithGenLayer,
   type MarketFilter,
 } from './market'

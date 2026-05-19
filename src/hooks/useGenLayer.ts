@@ -1,27 +1,31 @@
 import { useState, useCallback } from 'react'
 import {
-  buyShares,
-  sellShares,
+  stake,
+  claim,
   resolveMarket,
   disputeResolution,
-  getUserPositions,
+  getUserStakes,
+  getPools,
+  getPoolsWithRetry,
   getMinFees,
 } from '../services/genlayer'
-import type { GenLayerResolution, Dispute, Position } from '../types/market'
+import { upsertMarketPools, getMarketPools } from '../services/supabase'
+import type { GenLayerResolution, Dispute, Stake, PoolEntry } from '../types/market'
 
 interface UseGenLayerReturn {
   resolution: GenLayerResolution | null
   disputeResult: Dispute | null
-  userPositions: Position[]
+  userStakes: Stake[]
+  pools: PoolEntry[]
   loading: boolean
   error: string | null
   txStatus: string | null
   minFees: { resolution: number; dispute: number }
-  buyShares: (account: string, marketId: string, question: string, outcomes: string[], endDate: string, outcomeIndex: number, amountGen: number) => Promise<boolean>
-  sellShares: (account: string, marketId: string, outcomeIndex: number, sharesAmount: number) => Promise<boolean>
-  resolve: (marketId: string, feeGen?: number) => Promise<GenLayerResolution | null>
+  stakeOnOutcome: (account: string, marketId: string, question: string, outcomes: string[], endDate: string, outcomeIndex: number, amountGen: number) => Promise<boolean>
+  claimWinnings: (account: string, marketId: string, outcomeIndex: number) => Promise<boolean>
+  resolve: (marketId: string, outcomeIndex: number, feeGen?: number) => Promise<GenLayerResolution | null>
   submitDispute: (resolutionId: number, marketId: string, evidenceUrl: string, reasoning: string, feeGen?: number) => Promise<Dispute | null>
-  fetchPositions: (marketId: string, user: string) => Promise<void>
+  fetchStakesAndPools: (marketId: string, user: string) => Promise<void>
   reset: () => void
   fetchMinFees: () => Promise<void>
 }
@@ -29,7 +33,8 @@ interface UseGenLayerReturn {
 export function useGenLayer(): UseGenLayerReturn {
   const [resolution, setResolution] = useState<GenLayerResolution | null>(null)
   const [disputeResult, setDisputeResult] = useState<Dispute | null>(null)
-  const [userPositions, setUserPositions] = useState<Position[]>([])
+  const [userStakes, setUserStakes] = useState<Stake[]>([])
+  const [pools, setPools] = useState<PoolEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [txStatus, setTxStatus] = useState<string | null>(null)
@@ -44,28 +49,35 @@ export function useGenLayer(): UseGenLayerReturn {
     }
   }, [])
 
-  const handleBuyShares = useCallback(
+  const handleStake = useCallback(
     async (account: string, marketId: string, question: string, outcomes: string[], endDate: string, outcomeIndex: number, amountGen: number) => {
       setLoading(true)
       setError(null)
-      setTxStatus('Buying shares...')
+      setTxStatus('Staking on outcome...')
 
       try {
-        const result = await buyShares(account, marketId, question, outcomes, endDate, outcomeIndex, amountGen, (stage) => {
+        const result = await stake(account, marketId, question, outcomes, endDate, outcomeIndex, amountGen, (stage) => {
           const statusMap: Record<string, string> = {
-            submitted: 'Submitted buy order to GenLayer',
+            submitted: 'Submitted stake to GenLayer',
             proposing: 'Processing transaction',
             verifying: 'Validating transaction',
             finalizing: 'Finalizing on-chain',
-            completed: 'Shares purchased successfully',
+            completed: 'Stake placed successfully',
           }
           setTxStatus(statusMap[stage] || stage)
         })
 
-        setTxStatus('Shares purchased')
+        // Fetch updated pools with retry and cache in Supabase
+        setTxStatus('Updating pool data...')
+        const pools = await getPoolsWithRetry(marketId)
+        if (pools.length > 0 && pools.some((p) => p.amount > 0)) {
+          await upsertMarketPools(marketId, pools)
+        }
+
+        setTxStatus('Stake placed')
         return result
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Buy shares failed'
+        const message = err instanceof Error ? err.message : 'Stake failed'
         setError(message)
         setTxStatus('Failed')
         throw err
@@ -76,28 +88,28 @@ export function useGenLayer(): UseGenLayerReturn {
     []
   )
 
-  const handleSellShares = useCallback(
-    async (account: string, marketId: string, outcomeIndex: number, sharesAmount: number) => {
+  const handleClaim = useCallback(
+    async (account: string, marketId: string, outcomeIndex: number) => {
       setLoading(true)
       setError(null)
-      setTxStatus('Selling shares...')
+      setTxStatus('Claiming winnings...')
 
       try {
-        const result = await sellShares(account, marketId, outcomeIndex, sharesAmount, (stage) => {
+        const result = await claim(account, marketId, outcomeIndex, (stage) => {
           const statusMap: Record<string, string> = {
-            submitted: 'Submitted sell order to GenLayer',
+            submitted: 'Submitted claim to GenLayer',
             proposing: 'Processing transaction',
             verifying: 'Validating transaction',
             finalizing: 'Finalizing on-chain',
-            completed: 'Shares sold successfully',
+            completed: 'Winnings claimed successfully',
           }
           setTxStatus(statusMap[stage] || stage)
         })
 
-        setTxStatus('Shares sold')
+        setTxStatus('Winnings claimed')
         return result
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Sell shares failed'
+        const message = err instanceof Error ? err.message : 'Claim failed'
         setError(message)
         setTxStatus('Failed')
         throw err
@@ -109,7 +121,7 @@ export function useGenLayer(): UseGenLayerReturn {
   )
 
   const handleResolve = useCallback(
-    async (marketId: string, feeGen?: number) => {
+    async (marketId: string, outcomeIndex: number, feeGen?: number) => {
       setLoading(true)
       setError(null)
       setResolution(null)
@@ -117,7 +129,7 @@ export function useGenLayer(): UseGenLayerReturn {
 
       try {
         const fee = feeGen || minFees.resolution
-        const result = await resolveMarket(marketId, fee, (stage) => {
+        const result = await resolveMarket(marketId, outcomeIndex, fee, (stage) => {
           const statusMap: Record<string, string> = {
             submitted: 'Submitted resolution to GenLayer',
             proposing: 'AI evaluating evidence',
@@ -180,19 +192,33 @@ export function useGenLayer(): UseGenLayerReturn {
     [minFees.dispute]
   )
 
-  const fetchPositions = useCallback(async (marketId: string, user: string) => {
+  const fetchStakesAndPools = useCallback(async (marketId: string, user: string) => {
     try {
-      const positions = await getUserPositions(marketId, user)
-      setUserPositions(positions)
+      const stakesResult = await getUserStakes(marketId, user)
+      setUserStakes(stakesResult)
+
+      const poolsResult = await getMarketPools(marketId)
+      if (poolsResult.length > 0) {
+        setPools(poolsResult)
+      } else {
+        const contractPools = await getPools(marketId)
+        if (contractPools.length > 0) {
+          await upsertMarketPools(marketId, contractPools)
+          setPools(contractPools)
+        } else {
+          setPools([])
+        }
+      }
     } catch (err) {
-      console.error('Failed to fetch positions:', err)
+      console.error('Failed to fetch stakes and pools:', err)
     }
   }, [])
 
   const reset = useCallback(() => {
     setResolution(null)
     setDisputeResult(null)
-    setUserPositions([])
+    setUserStakes([])
+    setPools([])
     setError(null)
     setLoading(false)
     setTxStatus(null)
@@ -201,16 +227,17 @@ export function useGenLayer(): UseGenLayerReturn {
   return {
     resolution,
     disputeResult,
-    userPositions,
+    userStakes,
+    pools,
     loading,
     error,
     txStatus,
     minFees,
-    buyShares: handleBuyShares,
-    sellShares: handleSellShares,
+    stakeOnOutcome: handleStake,
+    claimWinnings: handleClaim,
     resolve: handleResolve,
     submitDispute: handleSubmitDispute,
-    fetchPositions,
+    fetchStakesAndPools,
     reset,
     fetchMinFees,
   }

@@ -2,8 +2,8 @@ import { useEffect, useState, useMemo, useCallback } from 'react'
 import { MarketCard } from './MarketCard'
 import { GroupedMarketCard, type MarketGroup } from './GroupedMarketCard'
 import { MarketsSkeleton } from './MarketSkeleton'
-import { getMarkets as getSupabaseMarkets } from '../services/supabase'
-import type { PolymarketMarket, MarketFilter, SupabaseMarketRow } from '../types/market'
+import { getMarkets as getSupabaseMarkets, getAllMarketPools } from '../services/supabase'
+import type { PolymarketMarket, MarketFilter, SupabaseMarketRow, PoolEntry } from '../types/market'
 
 function parseCategory(raw: string): string {
   if (!raw) return 'Other'
@@ -96,19 +96,46 @@ export function MarketsList() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<MarketFilter>('active')
+  const [poolsByMarketId, setPoolsByMarketId] = useState<Record<string, PoolEntry[]>>({})
+  const [search, setSearch] = useState('')
 
   const fetchMarkets = useCallback(async () => {
     try {
       setLoading(true)
       setError(null)
 
-      const supabaseMarkets = await getSupabaseMarkets({
-        status: filter === 'all' ? undefined : filter === 'active' ? 'active' : filter === 'resolved' ? 'resolved' : undefined,
-        limit: 200,
-      })
+      let supabaseMarkets: SupabaseMarketRow[]
+
+      if (filter === 'closing-soon') {
+        supabaseMarkets = await getSupabaseMarkets({
+          status: 'active',
+          limit: 500,
+          orderBy: 'end_date',
+        })
+      } else if (filter === 'trending') {
+        supabaseMarkets = await getSupabaseMarkets({
+          status: 'active',
+          limit: 200,
+          orderBy: 'volume_24h',
+        })
+      } else if (filter === 'resolved') {
+        supabaseMarkets = await getSupabaseMarkets({
+          status: 'resolved',
+          limit: 200,
+        })
+      } else {
+        supabaseMarkets = await getSupabaseMarkets({
+          status: 'active',
+          limit: 500,
+        })
+      }
 
       const polymarketMarkets = supabaseMarkets.map(toPolymarketMarket)
       setMarkets(polymarketMarkets)
+
+      const marketIds = polymarketMarkets.map((m) => m.id)
+      const poolsMap = await getAllMarketPools(marketIds)
+      setPoolsByMarketId(poolsMap)
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to fetch markets'
       setError(errorMsg)
@@ -122,14 +149,47 @@ export function MarketsList() {
   }, [fetchMarkets])
 
   const filteredItems = useMemo(() => {
-    let filtered = markets
-    if (filter === 'active') {
-      filtered = markets.filter((m) => m.status === 'active')
-    } else if (filter === 'resolved') {
-      filtered = markets.filter((m) => m.status === 'resolved' || m.status === 'closed')
+    const now = new Date()
+
+    function getDaysLeft(m: PolymarketMarket): number {
+      if (!m.endDate) return Infinity
+      const end = new Date(m.endDate)
+      return Math.max(0, (end.getTime() - now.getTime()) / (1000 * 60 * 60 * 24))
     }
+
+    function isExpired(m: PolymarketMarket): boolean {
+      if (!m.endDate) return false
+      return now > new Date(m.endDate)
+    }
+
+    let filtered = [...markets]
+
+    if (filter === 'active') {
+      filtered = filtered.filter((m) => m.status === 'active' && !isExpired(m))
+      filtered.sort((a, b) => getDaysLeft(a) - getDaysLeft(b))
+    } else if (filter === 'trending') {
+      filtered = filtered.filter((m) => m.status === 'active' && !isExpired(m))
+      filtered.sort((a, b) => b.volume24h - a.volume24h)
+    } else if (filter === 'closing-soon') {
+      filtered = filtered.filter((m) => m.status === 'active' && !isExpired(m) && m.endDate)
+      filtered.sort((a, b) => getDaysLeft(a) - getDaysLeft(b))
+    } else if (filter === 'resolved') {
+      filtered = filtered.filter((m) => m.status === 'resolved' || m.status === 'closed')
+      filtered.sort((a, b) => new Date(b.endDate || 0).getTime() - new Date(a.endDate || 0).getTime())
+    }
+
+    if (search.trim()) {
+      const q = search.trim().toLowerCase()
+      filtered = filtered.filter((m) =>
+        m.question.toLowerCase().includes(q) ||
+        m.description.toLowerCase().includes(q) ||
+        m.category.toLowerCase().includes(q) ||
+        m.tags.some((t) => t.toLowerCase().includes(q))
+      )
+    }
+
     return groupMarkets(filtered)
-  }, [markets, filter])
+  }, [markets, filter, search])
 
   if (loading) {
     return <MarketsSkeleton />
@@ -148,18 +208,36 @@ export function MarketsList() {
     <div className="markets-list">
       <div className="markets-header">
         <h2 className="section-title light">Prediction Markets</h2>
-        <div className="markets-filter-bar" role="tablist" aria-label="Market filter">
-          {(['active', 'trending', 'closing-soon', 'resolved', 'all'] as MarketFilter[]).map((f) => (
-            <button
-              key={f}
-              className={`filter-segment ${filter === f ? 'active' : ''}`}
-              onClick={() => setFilter(f)}
-              role="tab"
-              aria-selected={filter === f}
-            >
-              {f === 'active' ? 'Live' : f === 'closing-soon' ? 'Closing Soon' : f.charAt(0).toUpperCase() + f.slice(1)}
-            </button>
-          ))}
+        <div className="markets-controls">
+          <div className="markets-search">
+            <svg className="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.35-4.35" />
+            </svg>
+            <input
+              type="text"
+              className="search-input"
+              placeholder="Search markets..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+            {search && (
+              <button className="search-clear" onClick={() => setSearch('')}>&times;</button>
+            )}
+          </div>
+          <div className="markets-filter-bar" role="tablist" aria-label="Market filter">
+            {(['active', 'trending', 'closing-soon', 'resolved'] as MarketFilter[]).map((f) => (
+              <button
+                key={f}
+                className={`filter-segment ${filter === f ? 'active' : ''}`}
+                onClick={() => setFilter(f)}
+                role="tab"
+                aria-selected={filter === f}
+              >
+                {f === 'active' ? 'Live' : f === 'closing-soon' ? 'Closing Soon' : f.charAt(0).toUpperCase() + f.slice(1)}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -171,9 +249,15 @@ export function MarketsList() {
         <div className="markets-grid">
           {filteredItems.map((item, index) => {
             if ('markets' in item) {
-              return <GroupedMarketCard key={`group-${index}`} group={item} />
+              const groupPools: Record<string, PoolEntry[]> = {}
+              for (const m of item.markets) {
+                if (poolsByMarketId[m.id]) {
+                  groupPools[m.id] = poolsByMarketId[m.id]
+                }
+              }
+              return <GroupedMarketCard key={`group-${index}`} group={item} poolsByMarketId={groupPools} />
             }
-            return <MarketCard key={item.id} market={item} animationDelay={index * 60} />
+            return <MarketCard key={item.id} market={item} animationDelay={index * 60} pools={poolsByMarketId[item.id]} />
           })}
         </div>
       )}

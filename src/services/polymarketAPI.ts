@@ -10,7 +10,12 @@ async function fetchFromGamma(path: string): Promise<unknown> {
   return response.json()
 }
 
-function mapStatus(raw: string): MarketStatus {
+function mapStatus(raw: string, endDate?: string): MarketStatus {
+  const now = new Date()
+  if (endDate) {
+    const end = new Date(endDate)
+    if (now > end) return 'closed'
+  }
   switch (raw) {
     case 'active':
     case 'open':
@@ -53,9 +58,11 @@ function parsePolymarketMarket(raw: Record<string, unknown>): PolymarketMarket {
     category = (raw.category as { label?: string }).label || 'Other'
   }
 
+  const endDate = (raw.end_date as string) || (raw.endDate as string) || ''
+
   return {
     id: (raw.id as string) || '',
-    conditionId: (raw.condition_id as string) || '',
+    conditionId: (raw.condition_id as string) || (raw.conditionId as string) || '',
     question: (raw.question as string) || '',
     description: (raw.description as string) || '',
     slug: (raw.slug as string) || '',
@@ -65,16 +72,16 @@ function parsePolymarketMarket(raw: Record<string, unknown>): PolymarketMarket {
     outcomePrices: outcomePricesRaw,
     probabilities,
     volume: parseFloat(String(raw.volume || 0)),
-    volume24h: parseFloat(String(raw.volume_24h || 0)),
+    volume24h: parseFloat(String(raw.volume_24h || raw.volume24hr || 0)),
     liquidity: parseFloat(String(raw.liquidity || 0)),
-    status: mapStatus(String(raw.closed || raw.status || 'active')),
-    closeDate: (raw.close_date as string) || '',
-    endDate: (raw.end_date as string) || '',
+    status: mapStatus(String(raw.closed || raw.status || 'active'), endDate),
+    closeDate: (raw.close_date as string) || (raw.closeDate as string) || '',
+    endDate,
     image: (raw.image as string) || '',
     icon: (raw.icon as string) || '',
-    resolutionSource: (raw.resolution_source as string) || '',
-    groupSlug: (raw.group_slug as string) || undefined,
-    groupName: (raw.group_name as string) || undefined,
+    resolutionSource: (raw.resolution_source as string) || (raw.resolutionSource as string) || '',
+    groupSlug: (raw.group_slug as string) || (raw.groupSlug as string) || undefined,
+    groupName: (raw.group_name as string) || (raw.groupName as string) || undefined,
   }
 }
 
@@ -122,6 +129,7 @@ export async function getActiveMarkets(options?: {
 
   if (options?.limit) params.set('limit', String(options.limit))
   if (options?.offset) params.set('offset', String(options.offset))
+  params.set('active', 'true')
   if (options?.closed !== undefined) params.set('closed', String(options.closed))
   if (options?.archived !== undefined) params.set('archived', String(options.archived))
   if (options?.id) params.set('id', options.id)
@@ -176,14 +184,15 @@ export async function getTrendingMarkets(limit = 20): Promise<PolymarketMarket[]
 
 export async function getClosingSoonMarkets(limit = 20): Promise<PolymarketMarket[]> {
   const now = new Date()
-  const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000)
-  const markets = await getActiveMarkets({ limit: 100, closed: false })
+  const week = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
+  const markets = await getActiveMarkets({ limit: 200, closed: false })
   return markets
     .filter((m) => {
-      if (!m.closeDate) return false
-      const closeDate = new Date(m.closeDate)
-      return closeDate > now && closeDate <= tomorrow
+      if (!m.endDate) return false
+      const endDate = new Date(m.endDate)
+      return endDate > now && endDate <= week
     })
+    .sort((a, b) => new Date(a.endDate).getTime() - new Date(b.endDate).getTime())
     .slice(0, limit)
 }
 
