@@ -50,13 +50,14 @@ export interface GenLayerResolution {
 export interface Dispute {
   id: number
   marketId: string
-  resolutionId: number
   challenger: string
   proposedOutcome: string
   proposedOutcomeIndex: number
   evidenceUrl: string
   reasoning: string
   status: 'pending' | 'under_review' | 'accepted' | 'rejected'
+  isValid: boolean
+  reviewed: boolean
   timestamp: string
   txHash: string
 }
@@ -66,6 +67,7 @@ export interface Stake {
   user: string
   outcomeIndex: number
   amount: number
+  claimed?: boolean
 }
 
 export interface PoolEntry {

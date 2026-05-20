@@ -17,57 +17,6 @@ function parseU256(raw: unknown): number {
   return Number(obj.value ?? 0)
 }
 
-function parseResolutionResult(raw: unknown, marketId: string): GenLayerResolution {
-  const obj = raw as Record<string, unknown>
-  return {
-    id: 0,
-    marketId,
-    resolvedOutcome: String(obj.resolved_outcome || ''),
-    outcomeIndex: parseU256(obj.resolved_outcome_index),
-    confidence: parseU256(obj.confidence),
-    reasoning: String(obj.reasoning || ''),
-    timestamp: String(obj.timestamp || ''),
-    txHash: '',
-    status: obj.is_finalized === true ? 'finalized' : 'resolved',
-    isFinalized: obj.is_finalized === true,
-  }
-}
-
-function parseDisputeResult(raw: unknown, marketId: string): Dispute {
-  const obj = raw as Record<string, unknown>
-  return {
-    id: 0,
-    marketId,
-    resolutionId: parseU256(obj.resolution_id),
-    challenger: String(obj.challenger || ''),
-    proposedOutcome: String(obj.proposed_outcome || ''),
-    proposedOutcomeIndex: parseU256(obj.proposed_outcome_index),
-    evidenceUrl: String(obj.evidence_url || ''),
-    reasoning: String(obj.reasoning || ''),
-    status: obj.is_valid === true ? 'accepted' : 'rejected',
-    timestamp: String(obj.timestamp || ''),
-    txHash: '',
-  }
-}
-
-function parseStakeResult(raw: unknown): Stake {
-  const obj = raw as Record<string, unknown>
-  return {
-    marketId: String(obj.market_id || ''),
-    user: String(obj.user || ''),
-    outcomeIndex: parseU256(obj.outcome_index),
-    amount: parseU256(obj.amount),
-  }
-}
-
-function parsePoolResult(raw: unknown): PoolEntry {
-  const obj = raw as Record<string, unknown>
-  return {
-    outcomeIndex: parseU256(obj.outcome_index),
-    amount: parseU256(obj.amount),
-  }
-}
-
 async function pollTransaction(
   client: ReturnType<typeof createGenLayerClient>,
   txHash: string,
@@ -154,7 +103,6 @@ export async function stake(
 
   onProgress?.('submitted')
 
-  // Single tx: stake auto-registers market if missing
   const txHash = await client.writeContract({
     address: CONTRACT_ADDRESS,
     functionName: 'stake',
@@ -186,7 +134,6 @@ export async function getPoolsWithRetry(marketId: string, retries = 3, delayMs =
 export async function claim(
   account: string,
   marketId: string,
-  _outcomeIndex: number,
   onProgress?: (stage: string) => void
 ): Promise<boolean> {
   if (!CONTRACT_ADDRESS) throw new Error('GenLayer contract address not configured')
@@ -210,25 +157,27 @@ export async function claim(
 }
 
 export async function resolveMarket(
+  account: string,
   marketId: string,
-  outcomeIndex: number,
-  feeGen: number,
+  question: string,
+  outcomes: string[],
+  endDate: string,
   onProgress?: (stage: string) => void
 ): Promise<GenLayerResolution | null> {
   if (!CONTRACT_ADDRESS) throw new Error('GenLayer contract address not configured')
 
   await switchToGenLayerNetwork()
 
-  const client = createGenLayerClient()
-  const feeWei = BigInt(Math.floor(feeGen * 1e18))
+  const client = createGenLayerClient(account as `0x${string}`)
+  const outcomesStr = outcomes.join(', ')
 
   onProgress?.('submitted')
 
   const txHash = await client.writeContract({
     address: CONTRACT_ADDRESS,
     functionName: 'resolve_market',
-    args: [marketId, BigInt(outcomeIndex)],
-    value: feeWei,
+    args: [marketId, question, outcomesStr, endDate],
+    value: 0n,
   })
 
   const success = await pollTransaction(client, txHash, onProgress)
@@ -236,33 +185,61 @@ export async function resolveMarket(
 
   onProgress?.('fetching_result')
 
-  const marketRaw = await client.readContract({
-    address: CONTRACT_ADDRESS,
-    functionName: 'get_market',
-    args: [marketId],
-  })
+  for (let attempt = 0; attempt < 200; attempt++) {
+    try {
+      const marketRaw = await client.readContract({
+        address: CONTRACT_ADDRESS,
+        functionName: 'get_market',
+        args: [marketId],
+      })
 
-  const market = marketRaw as Record<string, unknown> | null
-  if (market && market.resolved_outcome !== undefined) {
-    return {
-      id: 0,
-      marketId,
-      resolvedOutcome: String(market.resolved_outcome || ''),
-      outcomeIndex: parseU256(market.resolved_outcome_index),
-      confidence: 100,
-      reasoning: '',
-      timestamp: new Date().toISOString(),
-      txHash,
-      status: 'finalized',
-      isFinalized: true,
+      console.log(`[GenLayer] get_market (${attempt + 1}) type=${typeof marketRaw}:`, JSON.stringify(marketRaw).slice(0, 300))
+
+      let jsonStr = ''
+      if (typeof marketRaw === 'string') {
+        jsonStr = marketRaw
+        if (jsonStr.startsWith('"') && jsonStr.endsWith('"')) {
+          try { jsonStr = JSON.parse(jsonStr) } catch { /* keep as-is */ }
+        }
+      }
+
+      if (!jsonStr || jsonStr === 'null' || jsonStr.length < 10) {
+        await new Promise((r) => setTimeout(r, 3000))
+        continue
+      }
+
+      const market = JSON.parse(jsonStr) as Record<string, unknown>
+
+      if (market.is_resolved === true) {
+        const outcomes = market.outcomes as string
+        const outcomeList = outcomes.split(',').map((o) => o.trim())
+        const outcomeIndex = parseU256(market.resolved_outcome_index)
+        return {
+          id: 0,
+          marketId,
+          resolvedOutcome: outcomeList[outcomeIndex] || `Outcome ${outcomeIndex + 1}`,
+          outcomeIndex,
+          confidence: 100,
+          reasoning: String(market.resolution_reasoning || ''),
+          timestamp: new Date().toISOString(),
+          txHash,
+          status: 'finalized',
+          isFinalized: true,
+        }
+      }
+
+      await new Promise((r) => setTimeout(r, 3000))
+    } catch (err) {
+      console.error(`[GenLayer] get_market error (${attempt + 1}):`, err)
+      await new Promise((r) => setTimeout(r, 3000))
     }
   }
 
-  throw new Error('Resolution completed but result could not be retrieved')
+  throw new Error('Resolution completed but state not yet propagated')
 }
 
 export async function disputeResolution(
-  resolutionId: number,
+  account: string,
   marketId: string,
   evidenceUrl: string,
   reasoning: string,
@@ -271,17 +248,20 @@ export async function disputeResolution(
 ): Promise<Dispute | null> {
   if (!CONTRACT_ADDRESS) throw new Error('GenLayer contract address not configured')
 
+  console.log('[disputeResolution] Starting — switching to GenLayer network')
   await switchToGenLayerNetwork()
+  console.log('[disputeResolution] Network switch done')
 
-  const client = createGenLayerClient()
+  const client = createGenLayerClient(account as `0x${string}`)
   const feeWei = BigInt(Math.floor(feeGen * 1e18))
 
+  console.log('[disputeResolution] Calling writeContract with args:', { marketId, evidenceUrl: evidenceUrl.slice(0, 50), reasoning: reasoning.slice(0, 50), feeWei })
   onProgress?.('submitted')
 
   const txHash = await client.writeContract({
     address: CONTRACT_ADDRESS,
     functionName: 'dispute_resolution',
-    args: [BigInt(resolutionId), marketId, evidenceUrl, reasoning],
+    args: [marketId, evidenceUrl, reasoning],
     value: feeWei,
   })
 
@@ -290,33 +270,37 @@ export async function disputeResolution(
 
   onProgress?.('fetching_result')
 
-  const countAfter = parseU256(
-    await client.readContract({
+  try {
+    const raw = await client.readContract({
       address: CONTRACT_ADDRESS,
-      functionName: 'get_dispute_count',
-      args: [],
+      functionName: 'get_dispute',
+      args: [marketId, account],
     })
-  )
 
-  for (let i = countAfter; i >= Math.max(1, countAfter - 3); i--) {
-    try {
-      const raw = await client.readContract({
-        address: CONTRACT_ADDRESS,
-        functionName: 'get_dispute',
-        args: [BigInt(i)],
-      })
-      const parsed = parseDisputeResult(raw, marketId)
-      if (parsed.proposedOutcome && parsed.proposedOutcome.length > 0) {
-        parsed.id = i
-        parsed.txHash = txHash
-        return parsed
-      }
-    } catch {
-      continue
+    const jsonStr = typeof raw === 'string' ? raw : String(raw ?? 'null')
+    if (jsonStr === 'null' || !jsonStr) {
+      throw new Error('Dispute record not found')
     }
-  }
 
-  throw new Error('Dispute completed but result could not be retrieved')
+    const parsed = JSON.parse(jsonStr) as Record<string, unknown>
+    return {
+      id: 0,
+      marketId,
+      challenger: String(parsed.challenger || account),
+      proposedOutcome: '',
+      proposedOutcomeIndex: parseU256(parsed.proposed_outcome_index),
+      evidenceUrl: String(parsed.evidence_urls || ''),
+      reasoning: String(parsed.reasoning || ''),
+      status: parsed.is_valid ? 'accepted' : 'rejected',
+      isValid: Boolean(parsed.is_valid),
+      reviewed: Boolean(parsed.reviewed),
+      timestamp: new Date().toISOString(),
+      txHash,
+    }
+  } catch (err) {
+    console.error('[GenLayer] Failed to fetch dispute result:', err)
+    throw new Error('Dispute completed but result could not be retrieved')
+  }
 }
 
 export async function getUserStakes(marketId: string, user: string): Promise<Stake[]> {
@@ -328,13 +312,21 @@ export async function getUserStakes(marketId: string, user: string): Promise<Sta
     const raw = await client.readContract({
       address: CONTRACT_ADDRESS,
       functionName: 'get_user_stakes',
-      args: [marketId, user as any],
+      args: [marketId, user],
     })
 
-    if (!Array.isArray(raw)) return []
+    const jsonStr = typeof raw === 'string' ? raw : String(raw ?? '[]')
+    const parsed = JSON.parse(jsonStr) as Record<string, unknown>[]
+    if (!Array.isArray(parsed)) return []
 
-    return raw.map(parseStakeResult)
-  } catch {
+    return parsed.map((s) => ({
+      marketId: String(s.market_id),
+      user: String(s.user),
+      outcomeIndex: parseU256(s.outcome_index),
+      amount: parseU256(s.amount),
+    }))
+  } catch (err) {
+    console.error('[GenLayer] getUserStakes error:', err)
     return []
   }
 }
@@ -351,18 +343,21 @@ export async function getPools(marketId: string): Promise<PoolEntry[]> {
       args: [marketId],
     })
 
-    console.log('[GenLayer] getPools raw:', JSON.stringify(raw))
+    const jsonStr = typeof raw === 'string' ? raw : String(raw ?? '')
+    const parsed = JSON.parse(jsonStr) as Record<string, unknown>[]
+    if (!Array.isArray(parsed)) return []
 
-    if (!Array.isArray(raw)) return []
-
-    return raw.map(parsePoolResult)
+    return parsed.map((p) => ({
+      outcomeIndex: parseU256(p.outcome_index),
+      amount: parseU256(p.amount),
+    }))
   } catch (err) {
     console.error('[GenLayer] getPools error:', err)
     return []
   }
 }
 
-export async function getResolution(marketId: string): Promise<GenLayerResolution | null> {
+export async function getMarketState(marketId: string): Promise<Record<string, unknown> | null> {
   if (!CONTRACT_ADDRESS) return null
 
   const client = createGenLayerClient()
@@ -370,42 +365,46 @@ export async function getResolution(marketId: string): Promise<GenLayerResolutio
   try {
     const raw = await client.readContract({
       address: CONTRACT_ADDRESS,
-      functionName: 'get_resolution_by_market',
+      functionName: 'get_market',
       args: [marketId],
     })
 
-    if (!raw) return null
+    const jsonStr = typeof raw === 'string' ? raw : String(raw ?? 'null')
+    if (jsonStr === 'null' || !jsonStr || jsonStr.length < 10) return null
 
-    const parsed = parseResolutionResult(raw, marketId)
-    return parsed
+    return JSON.parse(jsonStr) as Record<string, unknown>
   } catch {
     return null
   }
 }
 
-export async function getMinFees(): Promise<{ resolution: number; dispute: number }> {
+export async function getMinFees(): Promise<{ stake: number; dispute: number }> {
   if (!CONTRACT_ADDRESS) {
-    return { resolution: 2, dispute: 0.5 }
+    return { stake: 0.001, dispute: 0.5 }
   }
 
   const client = createGenLayerClient()
 
-  const [resolutionRaw, disputeRaw] = await Promise.all([
-    client.readContract({
-      address: CONTRACT_ADDRESS,
-      functionName: 'get_min_resolution_fee',
-      args: [],
-    }),
-    client.readContract({
-      address: CONTRACT_ADDRESS,
-      functionName: 'get_min_dispute_fee',
-      args: [],
-    }),
-  ])
+  try {
+    const [stakeRaw, disputeRaw] = await Promise.all([
+      client.readContract({
+        address: CONTRACT_ADDRESS,
+        functionName: 'get_min_stake',
+        args: [],
+      }),
+      client.readContract({
+        address: CONTRACT_ADDRESS,
+        functionName: 'get_min_dispute_fee',
+        args: [],
+      }),
+    ])
 
-  return {
-    resolution: parseU256(resolutionRaw) / 1e18,
-    dispute: parseU256(disputeRaw) / 1e18,
+    return {
+      stake: parseU256(stakeRaw) / 1e18,
+      dispute: parseU256(disputeRaw) / 1e18,
+    }
+  } catch {
+    return { stake: 0.001, dispute: 0.5 }
   }
 }
 

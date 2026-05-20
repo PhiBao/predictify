@@ -25,7 +25,10 @@ export function DisputeModal({ market, resolution, onClose, onDisputed }: Disput
   const [step, setStep] = useState<'input' | 'processing' | 'done'>('input')
 
   const handleDispute = async () => {
+    console.log('[DisputeModal] handleDispute clicked', { address, isConnected, selectedOutcome, evidenceUrl, reasoning, genAmount, minFees, network: network.current })
+
     if (!isConnected || !address) {
+      console.warn('[DisputeModal] Wallet not connected', { isConnected, address })
       showToast('Please connect your wallet first', 'warning')
       return
     }
@@ -59,13 +62,20 @@ export function DisputeModal({ market, resolution, onClose, onDisputed }: Disput
     setStep('processing')
 
     try {
-      const result = await submitDispute(resolution.id, market.id, evidenceUrl, reasoning, genAmountNum)
+      console.log('[DisputeModal] Calling submitDispute with:', { address, marketId: market.id, evidenceUrl, reasoning, genAmountNum })
+      const result = await submitDispute(address, market.id, evidenceUrl, reasoning, genAmountNum)
+      console.log('[DisputeModal] submitDispute returned:', result)
       if (result) {
         onDisputed()
         setStep('done')
         showToast('Dispute submitted to GenLayer!', 'success')
+      } else {
+        console.warn('[DisputeModal] submitDispute returned null — unexpected')
+        showToast('Dispute transaction sent but result unclear. Check contract.', 'warning')
+        setStep('input')
       }
-    } catch {
+    } catch (err) {
+      console.error('[DisputeModal] submitDispute threw:', err)
       setStep('input')
       showToast('Dispute failed. Check error details.', 'error')
     }
@@ -169,7 +179,7 @@ export function DisputeModal({ market, resolution, onClose, onDisputed }: Disput
                 <button
                   className="btn-pill btn-pill-primary"
                   onClick={handleDispute}
-                  disabled={loading || !selectedOutcome || !evidenceUrl.trim() || !reasoning.trim()}
+                  disabled={loading || !address || !selectedOutcome || !evidenceUrl.trim() || !reasoning.trim()}
                   style={{ width: '100%', marginTop: '16px' }}
                 >
                   {loading ? 'Submitting Dispute...' : `Submit Dispute for ${parseFloat(genAmount) || 0} GEN`}

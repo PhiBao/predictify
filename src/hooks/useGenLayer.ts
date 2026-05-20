@@ -20,11 +20,11 @@ interface UseGenLayerReturn {
   loading: boolean
   error: string | null
   txStatus: string | null
-  minFees: { resolution: number; dispute: number }
+  minFees: { stake: number; dispute: number }
   stakeOnOutcome: (account: string, marketId: string, question: string, outcomes: string[], endDate: string, outcomeIndex: number, amountGen: number) => Promise<boolean>
-  claimWinnings: (account: string, marketId: string, outcomeIndex: number) => Promise<boolean>
-  resolve: (marketId: string, outcomeIndex: number, feeGen?: number) => Promise<GenLayerResolution | null>
-  submitDispute: (resolutionId: number, marketId: string, evidenceUrl: string, reasoning: string, feeGen?: number) => Promise<Dispute | null>
+  claimWinnings: (account: string, marketId: string) => Promise<boolean>
+  resolve: (account: string, marketId: string, question: string, outcomes: string[], endDate: string) => Promise<GenLayerResolution | null>
+  submitDispute: (account: string, marketId: string, evidenceUrl: string, reasoning: string, feeGen?: number) => Promise<Dispute | null>
   fetchStakesAndPools: (marketId: string, user: string) => Promise<void>
   reset: () => void
   fetchMinFees: () => Promise<void>
@@ -38,7 +38,7 @@ export function useGenLayer(): UseGenLayerReturn {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [txStatus, setTxStatus] = useState<string | null>(null)
-  const [minFees, setMinFees] = useState({ resolution: 2, dispute: 0.5 })
+  const [minFees, setMinFees] = useState({ stake: 0.001, dispute: 0.5 })
 
   const fetchMinFees = useCallback(async () => {
     try {
@@ -67,7 +67,15 @@ export function useGenLayer(): UseGenLayerReturn {
           setTxStatus(statusMap[stage] || stage)
         })
 
-        // Fetch updated pools with retry and cache in Supabase
+        setTxStatus('Updating portfolio...')
+        const { upsertStake } = await import('../services/supabase')
+        await upsertStake({
+          market_id: marketId,
+          user: account,
+          outcome_index: outcomeIndex,
+          amount: amountGen,
+        })
+
         setTxStatus('Updating pool data...')
         const pools = await getPoolsWithRetry(marketId)
         if (pools.length > 0 && pools.some((p) => p.amount > 0)) {
@@ -89,13 +97,13 @@ export function useGenLayer(): UseGenLayerReturn {
   )
 
   const handleClaim = useCallback(
-    async (account: string, marketId: string, outcomeIndex: number) => {
+    async (account: string, marketId: string) => {
       setLoading(true)
       setError(null)
       setTxStatus('Claiming winnings...')
 
       try {
-        const result = await claim(account, marketId, outcomeIndex, (stage) => {
+        const result = await claim(account, marketId, (stage) => {
           const statusMap: Record<string, string> = {
             submitted: 'Submitted claim to GenLayer',
             proposing: 'Processing transaction',
@@ -121,15 +129,14 @@ export function useGenLayer(): UseGenLayerReturn {
   )
 
   const handleResolve = useCallback(
-    async (marketId: string, outcomeIndex: number, feeGen?: number) => {
+    async (account: string, marketId: string, question: string, outcomes: string[], endDate: string) => {
       setLoading(true)
       setError(null)
       setResolution(null)
       setTxStatus('Submitting resolution...')
 
       try {
-        const fee = feeGen || minFees.resolution
-        const result = await resolveMarket(marketId, outcomeIndex, fee, (stage) => {
+        const result = await resolveMarket(account, marketId, question, outcomes, endDate, (stage) => {
           const statusMap: Record<string, string> = {
             submitted: 'Submitted resolution to GenLayer',
             proposing: 'AI evaluating evidence',
@@ -153,11 +160,12 @@ export function useGenLayer(): UseGenLayerReturn {
         setLoading(false)
       }
     },
-    [minFees.resolution]
+    []
   )
 
   const handleSubmitDispute = useCallback(
-    async (resolutionId: number, marketId: string, evidenceUrl: string, reasoning: string, feeGen?: number) => {
+    async (account: string, marketId: string, evidenceUrl: string, reasoning: string, feeGen?: number) => {
+      console.log('[useGenLayer] handleSubmitDispute called', { account, marketId, evidenceUrl: evidenceUrl.slice(0, 50), reasoning: reasoning.slice(0, 50), feeGen })
       setLoading(true)
       setError(null)
       setDisputeResult(null)
@@ -165,7 +173,8 @@ export function useGenLayer(): UseGenLayerReturn {
 
       try {
         const fee = feeGen || minFees.dispute
-        const result = await disputeResolution(resolutionId, marketId, evidenceUrl, reasoning, fee, (stage) => {
+        console.log('[useGenLayer] Calling disputeResolution with fee:', fee)
+        const result = await disputeResolution(account, marketId, evidenceUrl, reasoning, fee, (stage) => {
           const statusMap: Record<string, string> = {
             submitted: 'Submitted dispute to GenLayer',
             proposing: 'AI reviewing dispute evidence',

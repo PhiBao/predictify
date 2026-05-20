@@ -56,10 +56,112 @@ export function MarketDetail() {
   } = useGenLayer()
 
   const [existingResolution, setExistingResolution] = useState<ReturnType<typeof useGenLayer>['resolution'] | null>(null)
+  const [contractResolved, setContractResolved] = useState(false)
+  const [contractResolutionData, setContractResolutionData] = useState<{
+    outcomeIndex: number
+    reasoning: string
+    resolvedAt: string
+    disputeDeadline: string
+  } | null>(null)
+  const [contractUserStakes, setContractUserStakes] = useState<any[]>([])
+  const [refreshKey, setRefreshKey] = useState(0)
 
   useEffect(() => {
     fetchMinFees()
   }, [fetchMinFees])
+
+  useEffect(() => {
+    if (!id) return
+    const marketId = id
+    let cancelled = false
+
+    async function checkContractState() {
+      try {
+        const CONTRACT_ADDRESS = import.meta.env.VITE_GENLAYER_CONTRACT || ''
+        console.log('[MarketDetail] Checking contract state, address:', CONTRACT_ADDRESS, 'marketId:', marketId)
+        if (!CONTRACT_ADDRESS) return
+
+        const { createGenLayerClient } = await import('../lib/genlayer/client')
+        const client = createGenLayerClient()
+
+        const raw = await client.readContract({
+          address: CONTRACT_ADDRESS,
+          functionName: 'get_market',
+          args: [marketId],
+        })
+
+        if (cancelled) return
+
+        const jsonStr = typeof raw === 'string' ? raw : String(raw ?? 'null')
+        console.log('[MarketDetail] Contract get_market raw:', jsonStr.slice(0, 300))
+
+        if (jsonStr === 'null' || !jsonStr || jsonStr.length < 10) {
+          console.log('[MarketDetail] Contract returned null/empty')
+          return
+        }
+
+        const parsed = JSON.parse(jsonStr) as Record<string, unknown>
+        console.log('[MarketDetail] Contract parsed:', {
+          is_resolved: parsed.is_resolved,
+          resolved_outcome_index: parsed.resolved_outcome_index,
+          resolution_reasoning: String(parsed.resolution_reasoning || '').slice(0, 50),
+          dispute_deadline: parsed.dispute_deadline,
+        })
+
+        if (parsed.is_resolved === true) {
+          console.log('[MarketDetail] Market IS resolved on contract!')
+          setContractResolved(true)
+          const resolutionData = {
+            outcomeIndex: Number(parsed.resolved_outcome_index ?? 0),
+            reasoning: String(parsed.resolution_reasoning || ''),
+            resolvedAt: String(parsed.resolved_at || ''),
+            disputeDeadline: String(parsed.dispute_deadline || ''),
+          }
+          console.log('[MarketDetail] Setting resolution data:', resolutionData)
+          setContractResolutionData(resolutionData)
+
+          // Fetch user stakes from contract using get_stake
+          if (isConnected && address) {
+            const outcomeCount = Number(parsed.outcome_count ?? 2)
+            const userStakes: any[] = []
+            for (let i = 0; i < outcomeCount; i++) {
+              try {
+                const stakeRaw = await client.readContract({
+                  address: CONTRACT_ADDRESS,
+                  functionName: 'get_stake',
+                  args: [marketId, address, BigInt(i)],
+                })
+                const stakeJson = typeof stakeRaw === 'string' ? stakeRaw : String(stakeRaw ?? 'null')
+                if (stakeJson !== 'null' && stakeJson) {
+                  const stakeParsed = JSON.parse(stakeJson) as Record<string, unknown>
+                  if (stakeParsed.exists === true) {
+                    userStakes.push({
+                      outcomeIndex: i,
+                      amount: Number(stakeParsed.amount ?? 0),
+                      claimed: Boolean(stakeParsed.claimed),
+                    })
+                  }
+                }
+              } catch (err) {
+                console.log('[MarketDetail] Failed to fetch stake for outcome', i, err)
+              }
+            }
+            console.log('[MarketDetail] User stakes from contract:', userStakes)
+            if (!cancelled) {
+              setContractUserStakes(userStakes)
+            }
+          }
+        } else {
+          console.log('[MarketDetail] Market NOT resolved on contract')
+        }
+      } catch (err) {
+        console.error('[MarketDetail] Contract state check failed:', err)
+      }
+    }
+
+    checkContractState()
+    return () => { cancelled = true }
+  }, [id, isConnected, address, refreshKey])
 
   useEffect(() => {
     let cancelled = false
@@ -166,19 +268,13 @@ export function MarketDetail() {
     }
   }
 
-  const handleClaim = async (outcomeIndex: number) => {
-    if (!market || !isConnected || !address) return
-    await claimWinnings(address, market.id, outcomeIndex)
-    showToast('Winnings claimed!', 'success')
-  }
-
   const openStakeModal = (outcomeIndex: number) => {
     setStakeOutcomeIndex(outcomeIndex)
     setShowStakeModal(true)
   }
 
   const handleResolve = async () => {
-    if (!market) return
+    if (!market || !address) return
     setShowResolutionModal(true)
   }
 
@@ -187,14 +283,25 @@ export function MarketDetail() {
     setShowDisputeModal(true)
   }
 
-  const currentResolution = existingResolution || resolution
+  const currentResolution = existingResolution || resolution || (contractResolutionData && market ? {
+    id: 0,
+    marketId: market.id,
+    resolvedOutcome: market.outcomes[contractResolutionData.outcomeIndex] || `Outcome ${contractResolutionData.outcomeIndex + 1}`,
+    outcomeIndex: contractResolutionData.outcomeIndex,
+    confidence: 100,
+    reasoning: contractResolutionData.reasoning,
+    timestamp: contractResolutionData.resolvedAt || new Date().toISOString(),
+    txHash: '',
+    status: 'finalized',
+    isFinalized: true,
+  } : null)
 
   const descriptionHtml = useMemo(() => {
     if (!market?.description) return ''
     return renderMarkdown(market.description)
   }, [market?.description])
 
-  const isResolved = market?.status === 'resolved' || market?.status === 'closed'
+  const isResolved = market?.status === 'resolved' || market?.status === 'closed' || contractResolved
 
   const totalPool = pools.reduce((sum, p) => sum + p.amount, 0)
 
@@ -202,18 +309,26 @@ export function MarketDetail() {
   const deadlineDate = deadline ? new Date(deadline) : null
   const now = new Date()
   const isExpired = deadlineDate ? now > deadlineDate : false
-  const daysLeft = deadlineDate ? Math.max(0, Math.ceil((deadlineDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24))) : null
-  const deadlineText = deadlineDate
-    ? isExpired
-      ? 'Market has ended'
-      : daysLeft === 0
-        ? 'Ends today'
-        : daysLeft === 1
-          ? 'Ends tomorrow'
-          : `${daysLeft} days left`
-    : 'No deadline set'
+  const msLeft = deadlineDate ? Math.max(0, deadlineDate.getTime() - now.getTime()) : 0
+
+  function formatDeadline(): string {
+    if (!deadlineDate) return 'No deadline set'
+    if (isExpired) return 'Ended'
+    if (msLeft < 60 * 1000) return `${Math.floor(msLeft / 1000)}s left`
+    if (msLeft < 60 * 60 * 1000) return `${Math.floor(msLeft / (60 * 1000))}m left`
+    if (msLeft < 24 * 60 * 60 * 1000) return `${Math.floor(msLeft / (60 * 60 * 1000))}h left`
+    const days = Math.ceil(msLeft / (24 * 60 * 60 * 1000))
+    return days === 1 ? '1 day left' : `${days} days left`
+  }
 
   const hasPassedDeadline = isExpired
+
+  const disputeWindowOpen = useMemo(() => {
+    if (!isResolved || !contractResolutionData) return false
+    const deadline = contractResolutionData.disputeDeadline
+    if (!deadline) return false
+    return new Date() < new Date(deadline)
+  }, [isResolved, contractResolutionData])
 
   const getPoolPercentage = (outcomeIndex: number) => {
     const pool = pools.find((p) => p.outcomeIndex === outcomeIndex)
@@ -223,7 +338,34 @@ export function MarketDetail() {
   }
 
   const userTotalStake = userStakes.reduce((sum, s) => sum + s.amount, 0)
-  const userWinningStake = userStakes.find((s) => currentResolution && s.outcomeIndex === currentResolution.outcomeIndex)
+  const contractStakeTotal = contractUserStakes.reduce((sum, s) => sum + s.amount, 0)
+  const effectiveStakes = contractUserStakes.length > 0 ? contractUserStakes : userStakes
+  const effectiveTotalStake = contractStakeTotal > 0 ? contractStakeTotal : userTotalStake
+
+  const userHasWinningStake = currentResolution
+    ? effectiveStakes.some((s) => s.outcomeIndex === currentResolution.outcomeIndex)
+    : false
+  const userHasLosingStake = currentResolution
+    ? effectiveStakes.some((s) => s.outcomeIndex !== currentResolution.outcomeIndex)
+    : false
+
+  // Debug logging
+  useEffect(() => {
+    console.log('[MarketDetail] Render state:', {
+      contractResolved,
+      contractResolutionData,
+      currentResolution: currentResolution ? { outcomeIndex: currentResolution.outcomeIndex, isFinalized: currentResolution.isFinalized } : null,
+      isResolved,
+      userStakes,
+      contractUserStakes,
+      effectiveStakes,
+      effectiveTotalStake,
+      userHasWinningStake,
+      userHasLosingStake,
+      disputeWindowOpen,
+      marketStatus: market?.status,
+    })
+  }, [contractResolved, contractResolutionData, currentResolution, isResolved, userStakes, contractUserStakes, effectiveStakes, effectiveTotalStake, userHasWinningStake, userHasLosingStake, disputeWindowOpen, market?.status])
 
   if (loading) {
     return (
@@ -272,7 +414,7 @@ export function MarketDetail() {
                 <span>Volume: {formatVolume(market.volume)}</span>
                 <span>Pool: {formatGen(totalPool)}</span>
                 <span className={`market-detail-deadline ${isExpired ? 'expired' : ''}`}>
-                  {deadlineText}
+                  {formatDeadline()}
                 </span>
               </div>
             </div>
@@ -288,17 +430,34 @@ export function MarketDetail() {
             </div>
           )}
 
-          {isConnected && address && userTotalStake > 0 && (
+          {isConnected && address && effectiveTotalStake > 0 && (
             <div className="stake-user-summary">
               <h3>Your Stakes</h3>
               <div className="stake-summary-row">
                 <span>Total staked</span>
-                <span>{formatGen(userTotalStake)}</span>
+                <span>{formatGen(effectiveTotalStake)}</span>
               </div>
-              {currentResolution && userWinningStake && (
-                <button className="btn-claim" onClick={() => handleClaim(userWinningStake.outcomeIndex)}>
-                  Claim Winnings
-                </button>
+              {isResolved && currentResolution && (
+                <div className={`stake-result-badge ${userHasWinningStake ? 'win' : 'lose'}`}>
+                  {disputeWindowOpen ? (
+                    userHasWinningStake ? (
+                      <>⏳ Waiting for dispute period to end</>
+                    ) : (
+                      <>
+                        ✗ You Lost. Winner: {market.outcomes[currentResolution.outcomeIndex]}
+                        {userHasLosingStake && (
+                          <button className="btn-dispute-inline" onClick={handleDispute}>Dispute</button>
+                        )}
+                      </>
+                    )
+                  ) : (
+                    userHasWinningStake ? (
+                      <>✓ You Won! Claim your winnings below</>
+                    ) : (
+                      <>✗ You Lost. Winner: {market.outcomes[currentResolution.outcomeIndex]}</>
+                    )
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -325,12 +484,12 @@ export function MarketDetail() {
               {market.outcomes.map((outcome, index) => {
                 const percentage = getPoolPercentage(index)
                 const isWinner = currentResolution?.outcomeIndex === index && currentResolution.isFinalized
-                const userStakeOnOutcome = userStakes.find((s) => s.outcomeIndex === index)
+                const userStakeOnOutcome = effectiveStakes.find((s) => s.outcomeIndex === index)
                 return (
                   <div
                     key={outcome}
-                    className={`outcome-card ${isWinner ? 'outcome-winner' : ''} ${!isResolved && isConnected && network.current === 'genlayer' ? 'outcome-card-clickable' : ''}`}
-                    onClick={() => !isResolved && isConnected && network.current === 'genlayer' && openStakeModal(index)}
+                    className={`outcome-card ${isWinner ? 'outcome-winner' : ''} ${isResolved ? 'outcome-card-resolved' : ''} ${!isResolved && !isExpired && isConnected && network.current === 'genlayer' ? 'outcome-card-clickable' : ''}`}
+                    onClick={() => !isResolved && !isExpired && isConnected && network.current === 'genlayer' && openStakeModal(index)}
                   >
                     <div className="outcome-card-header">
                       <span className="outcome-card-name">{outcome}</span>
@@ -347,11 +506,16 @@ export function MarketDetail() {
                       <span>{formatGen(pools.find((p) => p.outcomeIndex === index)?.amount ?? 0)}</span>
                     </div>
                     {userStakeOnOutcome && (
-                      <div className="outcome-user-stake">
+                      <div className={`outcome-user-stake ${isResolved ? (isWinner ? 'stake-won' : 'stake-lost') : ''}`}>
                         Your stake: {formatGen(userStakeOnOutcome.amount)}
+                        {isResolved && (
+                          <span className="stake-result-tag">
+                            {isWinner ? '✓ Won' : '✗ Lost'}
+                          </span>
+                        )}
                       </div>
                     )}
-                    {!isResolved && isConnected && network.current === 'genlayer' && (
+                    {!isResolved && !isExpired && isConnected && network.current === 'genlayer' && (
                       <span className="outcome-stake-hint">Click to stake →</span>
                     )}
                   </div>
@@ -405,21 +569,82 @@ export function MarketDetail() {
                   </span>
                 </div>
 
-                {!isResolved && !currentResolution.isFinalized && isConnected && (
+                {isResolved && disputeWindowOpen && isConnected && (
                   <div className="resolution-actions">
-                    <button className="btn btn-secondary" onClick={handleDispute}>
-                      Dispute Resolution
-                    </button>
+                    {userHasWinningStake ? (
+                      <div className="dispute-waiting-banner">
+                        <span className="waiting-icon">⏳</span>
+                        <div className="waiting-text">
+                          <strong>Waiting for dispute period to end</strong>
+                          <span>
+                            {contractResolutionData?.disputeDeadline
+                              ? `Dispute window closes ${new Date(contractResolutionData.disputeDeadline).toLocaleString()}`
+                              : '1 day dispute window in progress'}
+                          </span>
+                        </div>
+                      </div>
+                    ) : userHasLosingStake ? (
+                      <button className="btn btn-secondary" onClick={handleDispute}>
+                        Dispute This Resolution
+                      </button>
+                    ) : (
+                      <div className="dispute-waiting-banner">
+                        <span className="waiting-icon">⏳</span>
+                        <div className="waiting-text">
+                          <strong>Dispute window open for losing stakers</strong>
+                          <span>
+                            {contractResolutionData?.disputeDeadline
+                              ? `Closes ${new Date(contractResolutionData.disputeDeadline).toLocaleString()}`
+                              : '1 day window'}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {isResolved && !disputeWindowOpen && effectiveStakes.length > 0 && (
+                  <div className="user-result-summary">
+                    {userHasWinningStake ? (
+                      <div className="user-result-badge win">
+                        <span className="result-icon">✓</span>
+                        <span>You Won! Claim your winnings below</span>
+                      </div>
+                    ) : (
+                      <div className="user-result-badge lose">
+                        <span className="result-icon">✗</span>
+                        <span>You Lost. Winner: {market.outcomes[currentResolution.outcomeIndex]}</span>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
             </div>
           )}
 
-          {!isResolved && hasPassedDeadline && isConnected && network.current === 'genlayer' && !currentResolution && (
+          {!isResolved && hasPassedDeadline && isConnected && !currentResolution && (
             <div className="market-detail-actions">
               <button className="btn-pill btn-pill-primary" onClick={handleResolve}>
                 Request Resolution
+              </button>
+            </div>
+          )}
+
+          {isResolved && !disputeWindowOpen && isConnected && userHasWinningStake && (
+            <div className="market-detail-actions">
+              <button
+                className="btn-pill btn-pill-primary"
+                onClick={async () => {
+                  if (!market || !address || !currentResolution) return
+                  try {
+                    await claimWinnings(address, market.id)
+                    showToast('Winnings claimed!', 'success')
+                  } catch (err) {
+                    showToast(err instanceof Error ? err.message : 'Claim failed', 'error')
+                  }
+                }}
+              >
+                Claim Winnings
               </button>
             </div>
           )}
@@ -432,6 +657,7 @@ export function MarketDetail() {
           onClose={() => setShowResolutionModal(false)}
           onResolved={(res) => {
             setExistingResolution(res)
+            setMarket((prev) => prev ? { ...prev, status: 'resolved' } : prev)
             setShowResolutionModal(false)
             showToast('Market resolved!', 'success')
           }}
@@ -445,6 +671,7 @@ export function MarketDetail() {
           onClose={() => setShowDisputeModal(false)}
           onDisputed={() => {
             setShowDisputeModal(false)
+            setRefreshKey((k) => k + 1)
             showToast('Dispute submitted!', 'success')
           }}
         />

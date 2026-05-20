@@ -15,20 +15,13 @@ export function ResolutionModal({ market, onClose, onResolved }: ResolutionModal
   const { address, isConnected } = useAccount()
   const network = useNetworkState()
   const { showToast } = useToast()
-  const { resolve, loading, error, txStatus, minFees } = useGenLayer()
+  const { resolve, loading, error, txStatus } = useGenLayer()
 
-  const [genAmount, setGenAmount] = useState(minFees.resolution.toString())
   const [step, setStep] = useState<'input' | 'processing' | 'done'>('input')
 
   const handleResolve = async () => {
     if (!isConnected || !address) {
       showToast('Please connect your wallet first', 'warning')
-      return
-    }
-
-    const genAmountNum = parseFloat(genAmount) || 0
-    if (genAmountNum < minFees.resolution) {
-      showToast(`Minimum fee is ${minFees.resolution} GEN`, 'warning')
       return
     }
 
@@ -40,7 +33,7 @@ export function ResolutionModal({ market, onClose, onResolved }: ResolutionModal
     setStep('processing')
 
     try {
-      const result = await resolve(market.id, genAmountNum)
+      const result = await resolve(address, market.id, market.question, market.outcomes, market.endDate || '')
       if (result) {
         onResolved(result)
         setStep('done')
@@ -92,22 +85,6 @@ export function ResolutionModal({ market, onClose, onResolved }: ResolutionModal
 
               {network.current === 'genlayer' && (
                 <>
-                  <div className="analysis-fee-row">
-                    <label>Resolution Fee</label>
-                    <div className="fee-input-group">
-                      <input
-                        type="number"
-                        min={minFees.resolution.toString()}
-                        step="0.1"
-                        value={genAmount}
-                        onChange={(e) => setGenAmount(e.target.value)}
-                        className="gen-input"
-                      />
-                      <span className="gen-label">GEN</span>
-                    </div>
-                    <span className="fee-hint">Minimum: {minFees.resolution} GEN</span>
-                  </div>
-
                   {error && <div className="error-message">{error}</div>}
 
                   <button
@@ -116,7 +93,7 @@ export function ResolutionModal({ market, onClose, onResolved }: ResolutionModal
                     disabled={loading}
                     style={{ width: '100%', marginTop: '16px' }}
                   >
-                    {loading ? 'Resolving...' : `Resolve for ${parseFloat(genAmount) || 0} GEN`}
+                    {loading ? 'Resolving...' : 'Request Resolution'}
                   </button>
                 </>
               )}

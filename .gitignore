@@ -31,3 +31,5 @@ dist-ssr
 # Build outputs
 build/
 .vercel
+__pycache__
+test_*

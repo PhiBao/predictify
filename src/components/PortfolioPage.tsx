@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useAccount } from 'wagmi'
 import { useNavigate } from 'react-router-dom'
-import { getAllUserStakes } from '../services/supabase'
-import { getPools } from '../services/genlayer'
+import { getAllUserStakes, upsertStake } from '../services/supabase'
+import { getUserStakes as getContractUserStakes, getPools } from '../services/genlayer'
 import { formatGen } from '../types/market'
 import type { SupabaseMarketRow } from '../types/market'
 import { useGenLayer } from '../hooks/useGenLayer'
@@ -17,6 +17,7 @@ interface PortfolioMarket {
   status: string
   endDate: string
   volume: number
+  outcomes: string[]
   groupSlug?: string
   isWinner: boolean
   canClaim: boolean
@@ -26,43 +27,107 @@ export function PortfolioPage() {
   const { address, isConnected } = useAccount()
   const navigate = useNavigate()
   const { showToast } = useToast()
-  const { claimWinnings, loading } = useGenLayer()
+  const { claimWinnings, resolve: handleResolve, loading } = useGenLayer()
 
   const [stakes, setStakes] = useState<PortfolioMarket[]>([])
   const [loadingData, setLoadingData] = useState(true)
   const [totalStaked, setTotalStaked] = useState(0)
+  const [resolvingId, setResolvingId] = useState<string | null>(null)
 
   const fetchPortfolio = useCallback(async () => {
     if (!address) return
     setLoadingData(true)
     try {
-      const supabaseStakes = await getAllUserStakes(address)
-      const marketIds = [...new Set(supabaseStakes.map((s) => s.market_id))]
+      // Fetch user stakes from Supabase first
+      let userStakes = await getAllUserStakes(address)
 
+      // Fallback: if Supabase has no stakes, check contract for markets with pool data
+      if (userStakes.length === 0) {
+        console.log('[Portfolio] No stakes in Supabase, checking contract...')
+        const { supabase } = await import('../services/supabase')
+        const { data: poolData } = await supabase
+          .from('market_pools')
+          .select('market_id')
+          .gt('total_staked', 0)
+          .limit(50)
+
+        const marketIds = poolData?.map((p) => p.market_id) || []
+
+        for (const marketId of marketIds) {
+          try {
+            const contractStakes = await getContractUserStakes(marketId, address)
+            for (const stake of contractStakes) {
+              if (stake.amount > 0) {
+                await upsertStake({
+                  market_id: stake.marketId,
+                  user: address,
+                  outcome_index: stake.outcomeIndex,
+                  amount: stake.amount,
+                })
+              }
+            }
+          } catch {
+            // skip
+          }
+        }
+
+        userStakes = await getAllUserStakes(address)
+      }
+
+      if (userStakes.length === 0) {
+        setStakes([])
+        setTotalStaked(0)
+        setLoadingData(false)
+        return
+      }
+
+      // Fetch market details only for markets where user has stakes
+      const marketIds = [...new Set(userStakes.map((s) => s.market_id))]
       const marketsMap: Record<string, SupabaseMarketRow> = {}
-      for (const marketId of marketIds) {
-        const { data, error } = await (await import('../services/supabase')).supabase
-          .from('markets')
-          .select('*')
-          .eq('id', marketId)
-          .single()
-        if (data && !error) {
-          marketsMap[marketId] = data
+
+      // Single query to fetch all markets at once
+      const { supabase } = await import('../services/supabase')
+      const { data } = await supabase
+        .from('markets')
+        .select('*')
+        .in('id', marketIds)
+
+      if (data) {
+        for (const m of data) {
+          marketsMap[m.id] = m
         }
       }
 
       const portfolioItems: PortfolioMarket[] = []
       let total = 0
 
-      for (const stake of supabaseStakes) {
+      for (const stake of userStakes) {
+        if (stake.amount <= 0) continue
+
         const market = marketsMap[stake.market_id]
-        if (!market) continue
+        if (!market) {
+          portfolioItems.push({
+            id: stake.market_id,
+            question: `Market ${stake.market_id.slice(0, 8)}...`,
+            outcome: `Outcome ${stake.outcome_index + 1}`,
+            outcomeIndex: stake.outcome_index,
+            amount: stake.amount,
+            status: 'unknown',
+            endDate: '',
+            volume: 0,
+            outcomes: ['Yes', 'No'],
+            isWinner: false,
+            canClaim: false,
+          })
+          total += stake.amount
+          continue
+        }
 
         const outcomes = market.outcomes
         const outcomeName = outcomes[stake.outcome_index] || `Outcome ${stake.outcome_index + 1}`
 
-        const isResolved = market.status === 'resolved' || market.status === 'closed'
         const isExpired = market.end_date ? new Date() > new Date(market.end_date) : false
+        const isResolved = market.status === 'resolved' || market.status === 'closed'
 
         let isWinner = false
         let canClaim = false
@@ -88,6 +153,7 @@ export function PortfolioPage() {
           status: market.status,
           endDate: market.end_date,
           volume: market.volume,
+          outcomes: market.outcomes,
           groupSlug: market.group_slug || undefined,
           isWinner,
           canClaim,
@@ -115,16 +181,30 @@ export function PortfolioPage() {
     }
   }, [isConnected, address, fetchPortfolio])
 
-  const handleClaim = useCallback(async (marketId: string, outcomeIndex: number) => {
+  const handleClaim = useCallback(async (marketId: string) => {
     if (!address) return
     try {
-      await claimWinnings(address, marketId, outcomeIndex)
+      await claimWinnings(address, marketId)
       showToast('Winnings claimed!', 'success')
       fetchPortfolio()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Claim failed', 'error')
     }
   }, [address, claimWinnings, showToast, fetchPortfolio])
+
+  const handleResolveStake = useCallback(async (stake: PortfolioMarket) => {
+    if (!address) return
+    setResolvingId(stake.id)
+    try {
+      await handleResolve(address, stake.id, stake.question, stake.outcomes, stake.endDate)
+      showToast('Resolution requested!', 'success')
+      fetchPortfolio()
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Resolution failed', 'error')
+    } finally {
+      setResolvingId(null)
+    }
+  }, [address, handleResolve, showToast, fetchPortfolio])
 
   if (!isConnected) {
     return (
@@ -178,8 +258,19 @@ export function PortfolioPage() {
           <div className="portfolio-list">
             {stakes.map((stake) => {
               const deadline = stake.endDate ? new Date(stake.endDate) : null
-              const daysLeft = deadline ? Math.max(0, Math.ceil((deadline.getTime() - Date.now()) / (1000 * 60 * 60 * 24))) : null
-              const isExpired = deadline ? Date.now() > deadline.getTime() : false
+              const now = new Date()
+              const isExpired = deadline ? now > deadline : false
+              const msLeft = deadline ? Math.max(0, deadline.getTime() - now.getTime()) : 0
+
+              function formatDeadline(): string {
+                if (!deadline) return ''
+                if (isExpired) return 'Ended'
+                if (msLeft < 60 * 1000) return `${Math.floor(msLeft / 1000)}s left`
+                if (msLeft < 60 * 60 * 1000) return `${Math.floor(msLeft / (60 * 1000))}m left`
+                if (msLeft < 24 * 60 * 60 * 1000) return `${Math.floor(msLeft / (60 * 60 * 1000))}h left`
+                const days = Math.ceil(msLeft / (24 * 60 * 60 * 1000))
+                return days === 1 ? '1 day left' : `${days}d left`
+              }
 
               return (
                 <div key={stake.id} className={`portfolio-card ${stake.isWinner ? 'portfolio-winner' : ''}`}>
@@ -200,19 +291,30 @@ export function PortfolioPage() {
                       <div className="portfolio-card-status">
                         {stake.canClaim && <span className="status-badge claimable">Claimable</span>}
                         {stake.isWinner && !stake.canClaim && <span className="status-badge winner">Winner</span>}
-                        {!stake.isWinner && isExpired && <span className="status-badge expired">Expired</span>}
-                        {!isExpired && <span className="status-badge active">{daysLeft}d left</span>}
+                        {!stake.isWinner && isExpired && !stake.canClaim && <span className="status-badge expired">Awaiting Resolution</span>}
+                        {!isExpired && <span className="status-badge active">{formatDeadline()}</span>}
                       </div>
 
-                      {stake.canClaim && (
-                        <button
-                          className="btn-claim-portfolio"
-                          onClick={() => handleClaim(stake.id, stake.outcomeIndex)}
-                          disabled={loading}
-                        >
-                          {loading ? 'Claiming...' : 'Claim Winnings'}
-                        </button>
-                      )}
+                      <div className="portfolio-card-actions">
+                        {stake.canClaim && (
+                          <button
+                            className="btn-claim-portfolio"
+                            onClick={() => handleClaim(stake.id)}
+                            disabled={loading}
+                          >
+                            {loading ? 'Claiming...' : 'Claim Winnings'}
+                          </button>
+                        )}
+                        {isExpired && !stake.canClaim && stake.status !== 'resolved' && (
+                          <button
+                            className="btn-resolve-portfolio"
+                            onClick={() => handleResolveStake(stake)}
+                            disabled={loading || resolvingId === stake.id}
+                          >
+                            {resolvingId === stake.id ? 'Resolving...' : 'Request Resolution'}
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>

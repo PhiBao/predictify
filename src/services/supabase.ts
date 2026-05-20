@@ -34,6 +34,68 @@ export async function upsertMarkets(markets: SupabaseMarketRow[]): Promise<void>
   if (error) throw new Error(`Failed to upsert markets: ${error.message}`)
 }
 
+export async function getExpiredMarkets(limit = 500): Promise<SupabaseMarketRow[]> {
+  const now = new Date().toISOString()
+  const maxRetries = 3
+  let lastError: Error | null = null
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      let query = supabase
+        .from('markets')
+        .select('*')
+        .lt('end_date', now)
+        .order('end_date', { ascending: false })
+        .limit(limit)
+
+      const { data, error } = await query
+      if (error) throw new Error(`Failed to fetch expired markets: ${error.message}`)
+      return data || []
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err))
+      console.warn(`[Supabase] getExpiredMarkets attempt ${attempt + 1} failed:`, lastError.message)
+      if (attempt < maxRetries - 1) {
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)))
+      }
+    }
+  }
+
+  throw lastError || new Error('Failed to fetch expired markets after retries')
+}
+
+export async function getClosingSoonMarkets(limit = 100): Promise<SupabaseMarketRow[]> {
+  const now = new Date().toISOString()
+  const weekFromNow = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+
+  const maxRetries = 3
+  let lastError: Error | null = null
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      let query = supabase
+        .from('markets')
+        .select('*')
+        .eq('status', 'active')
+        .gte('end_date', now)
+        .lte('end_date', weekFromNow)
+        .order('end_date', { ascending: true })
+        .limit(limit)
+
+      const { data, error } = await query
+      if (error) throw new Error(`Failed to fetch closing soon markets: ${error.message}`)
+      return data || []
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err))
+      console.warn(`[Supabase] getClosingSoonMarkets attempt ${attempt + 1} failed:`, lastError.message)
+      if (attempt < maxRetries - 1) {
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)))
+      }
+    }
+  }
+
+  throw lastError || new Error('Failed to fetch closing soon markets after retries')
+}
+
 export async function getMarkets(options?: {
   status?: MarketStatus
   category?: string
@@ -42,32 +104,47 @@ export async function getMarkets(options?: {
   search?: string
   orderBy?: 'volume' | 'end_date' | 'volume_24h'
 }): Promise<SupabaseMarketRow[]> {
-  let query = supabase.from('markets').select('*')
+  const maxRetries = 3
+  let lastError: Error | null = null
 
-  if (options?.status) {
-    query = query.eq('status', options.status)
-  }
-  if (options?.category) {
-    query = query.eq('category', options.category)
-  }
-  if (options?.search) {
-    query = query.or(`question.ilike.%${options.search}%,description.ilike.%${options.search}%`)
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      let query = supabase.from('markets').select('*')
+
+      if (options?.status) {
+        query = query.eq('status', options.status)
+      }
+      if (options?.category) {
+        query = query.eq('category', options.category)
+      }
+      if (options?.search) {
+        query = query.or(`question.ilike.%${options.search}%,description.ilike.%${options.search}%`)
+      }
+
+      const orderBy = options?.orderBy || 'volume'
+      const ascending = orderBy === 'end_date'
+      query = query.order(orderBy, { ascending })
+
+      if (options?.limit) {
+        query = query.limit(options.limit)
+      }
+      if (options?.offset) {
+        query = query.range(options.offset, (options.offset + (options.limit || 20)) - 1)
+      }
+
+      const { data, error } = await query
+      if (error) throw new Error(`Failed to fetch markets: ${error.message}`)
+      return data || []
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err))
+      console.warn(`[Supabase] getMarkets attempt ${attempt + 1} failed:`, lastError.message)
+      if (attempt < maxRetries - 1) {
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)))
+      }
+    }
   }
 
-  const orderBy = options?.orderBy || 'volume'
-  const ascending = orderBy === 'end_date'
-  query = query.order(orderBy, { ascending })
-
-  if (options?.limit) {
-    query = query.limit(options.limit)
-  }
-  if (options?.offset) {
-    query = query.range(options.offset, (options.offset + (options.limit || 20)) - 1)
-  }
-
-  const { data, error } = await query
-  if (error) throw new Error(`Failed to fetch markets: ${error.message}`)
-  return data || []
+  throw lastError || new Error('Failed to fetch markets after retries')
 }
 
 export async function getMarketById(id: string): Promise<SupabaseMarketRow | null> {
@@ -158,7 +235,7 @@ export async function updateDisputeStatus(id: number, status: string): Promise<v
   if (error) throw new Error(`Failed to update dispute: ${error.message}`)
 }
 
-export async function upsertStake(stake: Omit<SupabaseStakeRow, 'created_at'>): Promise<void> {
+export async function upsertStake(stake: Omit<SupabaseStakeRow, 'created_at' | 'id'>): Promise<void> {
   const { error } = await supabase
     .from('stakes')
     .upsert(stake, { onConflict: 'market_id,user,outcome_index' })
@@ -238,19 +315,36 @@ export async function getMarketPools(marketId: string): Promise<{ outcomeIndex: 
 
 export async function getAllMarketPools(marketIds: string[]): Promise<Record<string, { outcomeIndex: number; amount: number }[]>> {
   if (marketIds.length === 0) return {}
-  const { data, error } = await supabase
-    .from('market_pools')
-    .select('market_id, pools_json')
-    .in('market_id', marketIds)
-  if (error) return {}
 
-  const result: Record<string, { outcomeIndex: number; amount: number }[]> = {}
-  for (const row of data || []) {
+  const maxRetries = 3
+  let lastError: Error | null = null
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      result[row.market_id] = JSON.parse(row.pools_json)
-    } catch {
-      // skip invalid
+      const { data, error } = await supabase
+        .from('market_pools')
+        .select('market_id, pools_json')
+        .in('market_id', marketIds)
+      if (error) throw new Error(`Failed to fetch pools: ${error.message}`)
+
+      const result: Record<string, { outcomeIndex: number; amount: number }[]> = {}
+      for (const row of data || []) {
+        try {
+          result[row.market_id] = JSON.parse(row.pools_json)
+        } catch {
+          // skip invalid
+        }
+      }
+      return result
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err))
+      console.warn(`[Supabase] getAllMarketPools attempt ${attempt + 1} failed:`, lastError.message)
+      if (attempt < maxRetries - 1) {
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)))
+      }
     }
   }
-  return result
+
+  console.error('[Supabase] getAllMarketPools failed after retries, returning empty')
+  return {}
 }

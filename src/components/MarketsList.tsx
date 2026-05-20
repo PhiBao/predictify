@@ -1,8 +1,8 @@
-import { useEffect, useState, useMemo, useCallback } from 'react'
+import { useEffect, useState, useMemo, useRef } from 'react'
 import { MarketCard } from './MarketCard'
 import { GroupedMarketCard, type MarketGroup } from './GroupedMarketCard'
 import { MarketsSkeleton } from './MarketSkeleton'
-import { getMarkets as getSupabaseMarkets, getAllMarketPools } from '../services/supabase'
+import { getMarkets as getSupabaseMarkets, getClosingSoonMarkets, getAllMarketPools } from '../services/supabase'
 import type { PolymarketMarket, MarketFilter, SupabaseMarketRow, PoolEntry } from '../types/market'
 
 function parseCategory(raw: string): string {
@@ -98,55 +98,73 @@ export function MarketsList() {
   const [filter, setFilter] = useState<MarketFilter>('active')
   const [poolsByMarketId, setPoolsByMarketId] = useState<Record<string, PoolEntry[]>>({})
   const [search, setSearch] = useState('')
+  const marketsRef = useRef<PolymarketMarket[]>([])
 
-  const fetchMarkets = useCallback(async () => {
-    try {
-      setLoading(true)
-      setError(null)
-
-      let supabaseMarkets: SupabaseMarketRow[]
-
-      if (filter === 'closing-soon') {
-        supabaseMarkets = await getSupabaseMarkets({
-          status: 'active',
-          limit: 500,
-          orderBy: 'end_date',
-        })
-      } else if (filter === 'trending') {
-        supabaseMarkets = await getSupabaseMarkets({
-          status: 'active',
-          limit: 200,
-          orderBy: 'volume_24h',
-        })
-      } else if (filter === 'resolved') {
-        supabaseMarkets = await getSupabaseMarkets({
-          status: 'resolved',
-          limit: 200,
-        })
-      } else {
-        supabaseMarkets = await getSupabaseMarkets({
-          status: 'active',
-          limit: 500,
-        })
-      }
-
-      const polymarketMarkets = supabaseMarkets.map(toPolymarketMarket)
-      setMarkets(polymarketMarkets)
-
-      const marketIds = polymarketMarkets.map((m) => m.id)
-      const poolsMap = await getAllMarketPools(marketIds)
-      setPoolsByMarketId(poolsMap)
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to fetch markets'
-      setError(errorMsg)
-    } finally {
-      setLoading(false)
-    }
-  }, [filter])
+  // Keep ref in sync
+  useEffect(() => {
+    marketsRef.current = markets
+  }, [markets])
 
   useEffect(() => {
+    let cancelled = false
+
+    // Clear markets immediately when filter changes to avoid showing stale data
+    setMarkets([])
+    setPoolsByMarketId({})
+    setLoading(true)
+
+    async function fetchMarkets() {
+      try {
+        setError(null)
+
+        let supabaseMarkets: SupabaseMarketRow[]
+
+        if (filter === 'closing-soon') {
+          supabaseMarkets = await getClosingSoonMarkets(100)
+        } else if (filter === 'trending') {
+          supabaseMarkets = await getSupabaseMarkets({
+            status: 'active',
+            limit: 200,
+            orderBy: 'volume_24h',
+          })
+        } else if (filter === 'resolved') {
+          supabaseMarkets = await getSupabaseMarkets({
+            status: 'resolved',
+            limit: 200,
+          })
+        } else {
+          supabaseMarkets = await getSupabaseMarkets({
+            status: 'active',
+            limit: 500,
+          })
+        }
+
+        if (cancelled) return
+
+        const polymarketMarkets = supabaseMarkets.map(toPolymarketMarket)
+        console.log(`[MarketsList] ${filter}: fetched ${supabaseMarkets.length} markets`)
+        setMarkets(polymarketMarkets)
+
+        const marketIds = polymarketMarkets.map((m) => m.id)
+        const poolsMap = await getAllMarketPools(marketIds)
+
+        if (cancelled) return
+        setPoolsByMarketId(poolsMap)
+      } catch (err) {
+        if (cancelled) return
+        const errorMsg = err instanceof Error ? err.message : 'Failed to fetch markets'
+        console.error('[MarketsList] Fetch error, keeping stale data:', errorMsg)
+        if (marketsRef.current.length === 0) {
+          setError(errorMsg)
+        }
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+
     fetchMarkets()
-  }, [fetchMarkets])
+    return () => { cancelled = true }
+  }, [filter])
 
   const filteredItems = useMemo(() => {
     const now = new Date()
@@ -188,6 +206,7 @@ export function MarketsList() {
       )
     }
 
+    console.log(`[MarketsList] ${filter}: ${markets.length} total -> ${filtered.length} after filter`)
     return groupMarkets(filtered)
   }, [markets, filter, search])
 
