@@ -78,7 +78,6 @@ export function MarketDetail() {
     async function checkContractState() {
       try {
         const CONTRACT_ADDRESS = import.meta.env.VITE_GENLAYER_CONTRACT || ''
-        console.log('[MarketDetail] Checking contract state, address:', CONTRACT_ADDRESS, 'marketId:', marketId)
         if (!CONTRACT_ADDRESS) return
 
         const { createGenLayerClient } = await import('../lib/genlayer/client')
@@ -93,23 +92,14 @@ export function MarketDetail() {
         if (cancelled) return
 
         const jsonStr = typeof raw === 'string' ? raw : String(raw ?? 'null')
-        console.log('[MarketDetail] Contract get_market raw:', jsonStr.slice(0, 300))
 
         if (jsonStr === 'null' || !jsonStr || jsonStr.length < 10) {
-          console.log('[MarketDetail] Contract returned null/empty')
           return
         }
 
         const parsed = JSON.parse(jsonStr) as Record<string, unknown>
-        console.log('[MarketDetail] Contract parsed:', {
-          is_resolved: parsed.is_resolved,
-          resolved_outcome_index: parsed.resolved_outcome_index,
-          resolution_reasoning: String(parsed.resolution_reasoning || '').slice(0, 50),
-          dispute_deadline: parsed.dispute_deadline,
-        })
 
         if (parsed.is_resolved === true) {
-          console.log('[MarketDetail] Market IS resolved on contract!')
           setContractResolved(true)
           const resolutionData = {
             outcomeIndex: Number(parsed.resolved_outcome_index ?? 0),
@@ -117,7 +107,6 @@ export function MarketDetail() {
             resolvedAt: String(parsed.resolved_at || ''),
             disputeDeadline: String(parsed.dispute_deadline || ''),
           }
-          console.log('[MarketDetail] Setting resolution data:', resolutionData)
           setContractResolutionData(resolutionData)
 
           // Fetch user stakes from contract using get_stake
@@ -142,20 +131,15 @@ export function MarketDetail() {
                     })
                   }
                 }
-              } catch (err) {
-                console.log('[MarketDetail] Failed to fetch stake for outcome', i, err)
+              } catch {
               }
             }
-            console.log('[MarketDetail] User stakes from contract:', userStakes)
             if (!cancelled) {
               setContractUserStakes(userStakes)
             }
           }
-        } else {
-          console.log('[MarketDetail] Market NOT resolved on contract')
         }
-      } catch (err) {
-        console.error('[MarketDetail] Contract state check failed:', err)
+      } catch {
       }
     }
 
@@ -348,24 +332,6 @@ export function MarketDetail() {
   const userHasLosingStake = currentResolution
     ? effectiveStakes.some((s) => s.outcomeIndex !== currentResolution.outcomeIndex)
     : false
-
-  // Debug logging
-  useEffect(() => {
-    console.log('[MarketDetail] Render state:', {
-      contractResolved,
-      contractResolutionData,
-      currentResolution: currentResolution ? { outcomeIndex: currentResolution.outcomeIndex, isFinalized: currentResolution.isFinalized } : null,
-      isResolved,
-      userStakes,
-      contractUserStakes,
-      effectiveStakes,
-      effectiveTotalStake,
-      userHasWinningStake,
-      userHasLosingStake,
-      disputeWindowOpen,
-      marketStatus: market?.status,
-    })
-  }, [contractResolved, contractResolutionData, currentResolution, isResolved, userStakes, contractUserStakes, effectiveStakes, effectiveTotalStake, userHasWinningStake, userHasLosingStake, disputeWindowOpen, market?.status])
 
   if (loading) {
     return (

@@ -5,6 +5,7 @@ import type {
   Stake,
   PoolEntry,
 } from '../types/market'
+export type { Dispute, Stake }
 
 const CONTRACT_ADDRESS = import.meta.env.VITE_GENLAYER_CONTRACT || ''
 const RPC_URL = GENLAYER_NETWORK.rpcUrls[0] || 'https://studio.genlayer.com/api'
@@ -24,7 +25,6 @@ async function pollTransaction(
 ): Promise<boolean> {
   try {
     onProgress?.('proposing')
-    console.log('[GenLayer] Waiting for receipt, txHash:', txHash)
 
     const receipt = await client.waitForTransactionReceipt({
       hash: txHash as any,
@@ -33,18 +33,13 @@ async function pollTransaction(
       retries: 200,
     })
 
-    console.log('[GenLayer] Receipt received:', receipt?.status)
     const isFinalized = receipt.status === 'FINALIZED' || receipt.status === 7
     if (isFinalized) {
       onProgress?.('completed')
       return true
     }
-    console.warn('[GenLayer] Receipt status not FINALIZED:', receipt.status)
     return false
   } catch (err) {
-    console.error('[GenLayer] waitForTransactionReceipt error:', err)
-    console.log('[GenLayer] Falling back to raw RPC polling...')
-
     for (let i = 0; i < 100; i++) {
       await new Promise((resolve) => setTimeout(resolve, 3000))
       try {
@@ -60,7 +55,6 @@ async function pollTransaction(
         })
         const json = await response.json()
         if (json.result) {
-          console.log('[GenLayer] Raw RPC receipt:', json.result)
           const statusOk = json.result.status === '0x1' || json.result.status === 1 || json.result.status === '0x7' || json.result.status === 7
           if (statusOk) {
             onProgress?.('completed')
@@ -68,15 +62,13 @@ async function pollTransaction(
           }
           return false
         }
-      } catch (fetchErr) {
-        console.log('[GenLayer] RPC poll attempt', i + 1, 'failed:', fetchErr)
+      } catch {
       }
       if (i < 10) onProgress?.('proposing')
       else if (i < 50) onProgress?.('verifying')
       else onProgress?.('finalizing')
     }
 
-    console.warn('[GenLayer] Polling timed out after 100 attempts')
     return false
   }
 }
@@ -99,8 +91,6 @@ export async function stake(
   const amountWei = BigInt(Math.floor(amountGen * 1e18))
   const outcomesStr = outcomes.join(', ')
 
-  console.log('[GenLayer] Stake params:', { marketId, outcomeIndex, amountGen, amountWei, contract: CONTRACT_ADDRESS })
-
   onProgress?.('submitted')
 
   const txHash = await client.writeContract({
@@ -109,8 +99,6 @@ export async function stake(
     args: [marketId, question, outcomesStr, endDate, BigInt(outcomeIndex)],
     value: amountWei,
   })
-
-  console.log('[GenLayer] Stake txHash:', txHash)
 
   const success = await pollTransaction(client, txHash, onProgress)
   if (!success) throw new Error('Stake transaction failed or timed out')
@@ -193,8 +181,6 @@ export async function resolveMarket(
         args: [marketId],
       })
 
-      console.log(`[GenLayer] get_market (${attempt + 1}) type=${typeof marketRaw}:`, JSON.stringify(marketRaw).slice(0, 300))
-
       let jsonStr = ''
       if (typeof marketRaw === 'string') {
         jsonStr = marketRaw
@@ -229,8 +215,7 @@ export async function resolveMarket(
       }
 
       await new Promise((r) => setTimeout(r, 3000))
-    } catch (err) {
-      console.error(`[GenLayer] get_market error (${attempt + 1}):`, err)
+    } catch {
       await new Promise((r) => setTimeout(r, 3000))
     }
   }
@@ -248,14 +233,11 @@ export async function disputeResolution(
 ): Promise<Dispute | null> {
   if (!CONTRACT_ADDRESS) throw new Error('GenLayer contract address not configured')
 
-  console.log('[disputeResolution] Starting — switching to GenLayer network')
   await switchToGenLayerNetwork()
-  console.log('[disputeResolution] Network switch done')
 
   const client = createGenLayerClient(account as `0x${string}`)
   const feeWei = BigInt(Math.floor(feeGen * 1e18))
 
-  console.log('[disputeResolution] Calling writeContract with args:', { marketId, evidenceUrl: evidenceUrl.slice(0, 50), reasoning: reasoning.slice(0, 50), feeWei })
   onProgress?.('submitted')
 
   const txHash = await client.writeContract({
@@ -271,18 +253,7 @@ export async function disputeResolution(
   onProgress?.('fetching_result')
 
   try {
-    const raw = await client.readContract({
-      address: CONTRACT_ADDRESS,
-      functionName: 'get_dispute',
-      args: [marketId, account],
-    })
-
-    const jsonStr = typeof raw === 'string' ? raw : String(raw ?? 'null')
-    if (jsonStr === 'null' || !jsonStr) {
-      throw new Error('Dispute record not found')
-    }
-
-    const parsed = JSON.parse(jsonStr) as Record<string, unknown>
+    const parsed = await fetchDisputeFromContract(client, marketId, account)
     return {
       id: 0,
       marketId,
@@ -294,12 +265,50 @@ export async function disputeResolution(
       status: parsed.is_valid ? 'accepted' : 'rejected',
       isValid: Boolean(parsed.is_valid),
       reviewed: Boolean(parsed.reviewed),
+      judgmentReasoning: String(parsed.judgment_reasoning || ''),
       timestamp: new Date().toISOString(),
       txHash,
     }
-  } catch (err) {
-    console.error('[GenLayer] Failed to fetch dispute result:', err)
+  } catch {
     throw new Error('Dispute completed but result could not be retrieved')
+  }
+}
+
+async function fetchDisputeFromContract(client: ReturnType<typeof createGenLayerClient>, marketId: string, user: string): Promise<Record<string, unknown>> {
+  const raw = await client.readContract({
+    address: CONTRACT_ADDRESS,
+    functionName: 'get_dispute',
+    args: [marketId, user],
+  })
+  const jsonStr = typeof raw === 'string' ? raw : String(raw ?? 'null')
+  if (jsonStr === 'null' || !jsonStr) {
+    throw new Error('Dispute record not found')
+  }
+  return JSON.parse(jsonStr) as Record<string, unknown>
+}
+
+export async function getDispute(marketId: string, user: string): Promise<Dispute | null> {
+  if (!CONTRACT_ADDRESS) return null
+  const client = createGenLayerClient()
+  try {
+    const parsed = await fetchDisputeFromContract(client, marketId, user)
+    return {
+      id: 0,
+      marketId,
+      challenger: String(parsed.challenger || user),
+      proposedOutcome: '',
+      proposedOutcomeIndex: parseU256(parsed.proposed_outcome_index),
+      evidenceUrl: String(parsed.evidence_urls || ''),
+      reasoning: String(parsed.reasoning || ''),
+      status: parsed.is_valid ? 'accepted' : 'rejected',
+      isValid: Boolean(parsed.is_valid),
+      reviewed: Boolean(parsed.reviewed),
+      judgmentReasoning: String(parsed.judgment_reasoning || ''),
+      timestamp: new Date().toISOString(),
+      txHash: '',
+    }
+  } catch {
+    return null
   }
 }
 
@@ -324,9 +333,9 @@ export async function getUserStakes(marketId: string, user: string): Promise<Sta
       user: String(s.user),
       outcomeIndex: parseU256(s.outcome_index),
       amount: parseU256(s.amount),
+      claimed: Boolean(s.claimed),
     }))
-  } catch (err) {
-    console.error('[GenLayer] getUserStakes error:', err)
+  } catch {
     return []
   }
 }
@@ -351,8 +360,7 @@ export async function getPools(marketId: string): Promise<PoolEntry[]> {
       outcomeIndex: parseU256(p.outcome_index),
       amount: parseU256(p.amount),
     }))
-  } catch (err) {
-    console.error('[GenLayer] getPools error:', err)
+  } catch {
     return []
   }
 }

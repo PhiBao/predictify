@@ -165,7 +165,6 @@ export function useGenLayer(): UseGenLayerReturn {
 
   const handleSubmitDispute = useCallback(
     async (account: string, marketId: string, evidenceUrl: string, reasoning: string, feeGen?: number) => {
-      console.log('[useGenLayer] handleSubmitDispute called', { account, marketId, evidenceUrl: evidenceUrl.slice(0, 50), reasoning: reasoning.slice(0, 50), feeGen })
       setLoading(true)
       setError(null)
       setDisputeResult(null)
@@ -173,7 +172,6 @@ export function useGenLayer(): UseGenLayerReturn {
 
       try {
         const fee = feeGen || minFees.dispute
-        console.log('[useGenLayer] Calling disputeResolution with fee:', fee)
         const result = await disputeResolution(account, marketId, evidenceUrl, reasoning, fee, (stage) => {
           const statusMap: Record<string, string> = {
             submitted: 'Submitted dispute to GenLayer',

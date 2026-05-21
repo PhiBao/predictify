@@ -53,7 +53,6 @@ export async function getExpiredMarkets(limit = 500): Promise<SupabaseMarketRow[
       return data || []
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err))
-      console.warn(`[Supabase] getExpiredMarkets attempt ${attempt + 1} failed:`, lastError.message)
       if (attempt < maxRetries - 1) {
         await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)))
       }
@@ -86,7 +85,6 @@ export async function getClosingSoonMarkets(limit = 100): Promise<SupabaseMarket
       return data || []
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err))
-      console.warn(`[Supabase] getClosingSoonMarkets attempt ${attempt + 1} failed:`, lastError.message)
       if (attempt < maxRetries - 1) {
         await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)))
       }
@@ -137,7 +135,6 @@ export async function getMarkets(options?: {
       return data || []
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err))
-      console.warn(`[Supabase] getMarkets attempt ${attempt + 1} failed:`, lastError.message)
       if (attempt < maxRetries - 1) {
         await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)))
       }
@@ -317,7 +314,6 @@ export async function getAllMarketPools(marketIds: string[]): Promise<Record<str
   if (marketIds.length === 0) return {}
 
   const maxRetries = 3
-  let lastError: Error | null = null
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
@@ -336,15 +332,12 @@ export async function getAllMarketPools(marketIds: string[]): Promise<Record<str
         }
       }
       return result
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err))
-      console.warn(`[Supabase] getAllMarketPools attempt ${attempt + 1} failed:`, lastError.message)
+    } catch {
       if (attempt < maxRetries - 1) {
         await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)))
       }
     }
   }
 
-  console.error('[Supabase] getAllMarketPools failed after retries, returning empty')
   return {}
 }

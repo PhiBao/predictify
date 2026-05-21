@@ -43,6 +43,7 @@ class DisputeRecord:
     is_valid: bool
     reviewed: bool
     fee_held: u256
+    judgment_reasoning: str
 
 
 @gl.evm.contract_interface
@@ -157,6 +158,7 @@ class PredictMarket(gl.Contract):
         current_total = self.pool_totals.get(pool_key, u256(0))
         self.pool_totals[pool_key] = current_total + amount
         market.total_pool += amount
+        self.markets[market_id] = market
 
     @gl.public.write
     def resolve_market(self, market_id: str, question: str, outcomes_str: str, end_date: str):
@@ -207,6 +209,7 @@ class PredictMarket(gl.Contract):
         market.resolution_reasoning = str(result.get("reasoning", ""))
         market.resolved_at = now_dt.isoformat()
         market.dispute_deadline = dispute_dt.isoformat()
+        self.markets[market_id] = market
 
     @gl.public.write.payable
     def dispute_resolution(self, market_id: str, evidence_urls: str, reasoning: str):
@@ -275,6 +278,7 @@ class PredictMarket(gl.Contract):
         result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
         is_valid = bool(result["is_valid"])
         correct_index = u32(_clamp_idx(result["correct_outcome_index"], outcome_count - 1))
+        judgment_reasoning = str(result.get("reasoning", ""))
         fee = gl.message.value
         self.dispute_count += 1
         self.disputes[dispute_key] = DisputeRecord(
@@ -286,12 +290,14 @@ class PredictMarket(gl.Contract):
             is_valid=is_valid,
             reviewed=True,
             fee_held=fee,
+            judgment_reasoning=judgment_reasoning,
         )
+        market.dispute_deadline = ""
         if is_valid:
             market.resolved_outcome_index = correct_index
-            market.resolution_reasoning = str(result.get("reasoning", ""))
-            market.dispute_deadline = ""
+            market.resolution_reasoning = judgment_reasoning
             _EOA(sender).emit_transfer(value=fee, on='finalized')
+        self.markets[market_id] = market
 
     @gl.public.write
     def claim_winnings(self, market_id: str):
@@ -386,6 +392,7 @@ class PredictMarket(gl.Contract):
                     "user": stake.user.as_hex,
                     "outcome_index": int(stake.outcome_index),
                     "amount": int(stake.amount),
+                    "claimed": stake.claimed,
                 })
             i = u32(int(i) + 1)
         return json.dumps(stakes_list)
@@ -404,6 +411,7 @@ class PredictMarket(gl.Contract):
             "reasoning": d.reasoning,
             "is_valid": d.is_valid,
             "reviewed": d.reviewed,
+            "judgment_reasoning": d.judgment_reasoning,
         })
 
     @gl.public.view

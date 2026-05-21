@@ -43,7 +43,6 @@ export function PortfolioPage() {
 
       // Fallback: if Supabase has no stakes, check contract for markets with pool data
       if (userStakes.length === 0) {
-        console.log('[Portfolio] No stakes in Supabase, checking contract...')
         const { supabase } = await import('../services/supabase')
         const { data: poolData } = await supabase
           .from('market_pools')

@@ -142,7 +142,6 @@ export function MarketsList() {
         if (cancelled) return
 
         const polymarketMarkets = supabaseMarkets.map(toPolymarketMarket)
-        console.log(`[MarketsList] ${filter}: fetched ${supabaseMarkets.length} markets`)
         setMarkets(polymarketMarkets)
 
         const marketIds = polymarketMarkets.map((m) => m.id)
@@ -153,7 +152,6 @@ export function MarketsList() {
       } catch (err) {
         if (cancelled) return
         const errorMsg = err instanceof Error ? err.message : 'Failed to fetch markets'
-        console.error('[MarketsList] Fetch error, keeping stale data:', errorMsg)
         if (marketsRef.current.length === 0) {
           setError(errorMsg)
         }
@@ -206,7 +204,6 @@ export function MarketsList() {
       )
     }
 
-    console.log(`[MarketsList] ${filter}: ${markets.length} total -> ${filtered.length} after filter`)
     return groupMarkets(filtered)
   }, [markets, filter, search])
 

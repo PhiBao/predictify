@@ -23,61 +23,58 @@ export function DisputeModal({ market, resolution, onClose, onDisputed }: Disput
   const [reasoning, setReasoning] = useState('')
   const [genAmount, setGenAmount] = useState(minFees.dispute.toString())
   const [step, setStep] = useState<'input' | 'processing' | 'done'>('input')
+  const [localError, setLocalError] = useState<string | null>(null)
+  const displayError = localError || error
 
   const handleDispute = async () => {
-    console.log('[DisputeModal] handleDispute clicked', { address, isConnected, selectedOutcome, evidenceUrl, reasoning, genAmount, minFees, network: network.current })
+    setLocalError(null)
 
     if (!isConnected || !address) {
-      console.warn('[DisputeModal] Wallet not connected', { isConnected, address })
-      showToast('Please connect your wallet first', 'warning')
+      setLocalError('Please connect your wallet first')
       return
     }
 
     if (!selectedOutcome) {
-      showToast('Please select the correct outcome', 'warning')
+      setLocalError('Please select the correct outcome')
       return
     }
 
     if (!evidenceUrl.trim()) {
-      showToast('Please provide an evidence URL', 'warning')
+      setLocalError('Please provide an evidence URL')
       return
     }
 
     if (!reasoning.trim()) {
-      showToast('Please provide reasoning for your dispute', 'warning')
+      setLocalError('Please provide reasoning for your dispute')
       return
     }
 
     const genAmountNum = parseFloat(genAmount) || 0
     if (genAmountNum < minFees.dispute) {
-      showToast(`Minimum fee is ${minFees.dispute} GEN`, 'warning')
+      setLocalError(`Minimum fee is ${minFees.dispute} GEN`)
       return
     }
 
     if (network.current !== 'genlayer') {
-      showToast('Please switch to GenLayer network first', 'warning')
+      setLocalError('Please switch to GenLayer network first')
       return
     }
 
     setStep('processing')
 
     try {
-      console.log('[DisputeModal] Calling submitDispute with:', { address, marketId: market.id, evidenceUrl, reasoning, genAmountNum })
       const result = await submitDispute(address, market.id, evidenceUrl, reasoning, genAmountNum)
-      console.log('[DisputeModal] submitDispute returned:', result)
       if (result) {
         onDisputed()
         setStep('done')
         showToast('Dispute submitted to GenLayer!', 'success')
       } else {
-        console.warn('[DisputeModal] submitDispute returned null — unexpected')
         showToast('Dispute transaction sent but result unclear. Check contract.', 'warning')
         setStep('input')
       }
     } catch (err) {
-      console.error('[DisputeModal] submitDispute threw:', err)
       setStep('input')
-      showToast('Dispute failed. Check error details.', 'error')
+      setLocalError(err instanceof Error ? err.message : 'Dispute failed')
     }
   }
 
@@ -173,13 +170,13 @@ export function DisputeModal({ market, resolution, onClose, onDisputed }: Disput
                 </div>
               )}
 
-              {error && <div className="error-message">{error}</div>}
+              {displayError && <div className="error-message" style={{ background: '#fff0f0', border: '1px solid #ffb3b3', color: '#d00', padding: '12px', borderRadius: '8px', marginBottom: '12px', fontSize: '14px' }}>{displayError}</div>}
 
               {network.current === 'genlayer' && (
                 <button
                   className="btn-pill btn-pill-primary"
                   onClick={handleDispute}
-                  disabled={loading || !address || !selectedOutcome || !evidenceUrl.trim() || !reasoning.trim()}
+                  disabled={loading}
                   style={{ width: '100%', marginTop: '16px' }}
                 >
                   {loading ? 'Submitting Dispute...' : `Submit Dispute for ${parseFloat(genAmount) || 0} GEN`}

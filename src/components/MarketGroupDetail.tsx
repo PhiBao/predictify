@@ -3,8 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useAccount } from 'wagmi'
 import { getMarketsByGroupSlug } from '../services/polymarketAPI'
 import { getMarketsByGroupSlug as getSupabaseGroupMarkets, getAllMarketPools, upsertMarketPools } from '../services/supabase'
-import { getPoolsWithRetry, getUserStakes as getContractUserStakes } from '../services/genlayer'
-import type { PolymarketMarket, PoolEntry, GenLayerResolution } from '../types/market'
+import { getPoolsWithRetry, getUserStakes as getContractUserStakes, getDispute as getContractDispute } from '../services/genlayer'
+import type { PolymarketMarket, PoolEntry, GenLayerResolution, Stake } from '../types/market'
 import { formatVolume, formatGen } from '../types/market'
 import { useToast } from '../contexts/ToastContext'
 import { useGenLayer } from '../hooks/useGenLayer'
@@ -48,7 +48,7 @@ export function MarketGroupDetail() {
   const { address, isConnected } = useAccount()
   const { showToast } = useToast()
   const network = useNetworkState()
-  const { stakeOnOutcome, resolve: handleResolve, loading: stakeLoading } = useGenLayer()
+  const { stakeOnOutcome, resolve: handleResolve, loading: stakeLoading, claimWinnings } = useGenLayer()
 
   const [groupMarkets, setGroupMarkets] = useState<PolymarketMarket[]>([])
   const [loading, setLoading] = useState(true)
@@ -58,6 +58,8 @@ export function MarketGroupDetail() {
   const [stakeModalMarket, setStakeModalMarket] = useState<PolymarketMarket | null>(null)
   const [stakeModalOutcomeIndex, setStakeModalOutcomeIndex] = useState(0)
   const [resolvingId, setResolvingId] = useState<string | null>(null)
+  const [claimingId, setClaimingId] = useState<string | null>(null)
+  const [claimedLocally, setClaimedLocally] = useState<Set<string>>(new Set())
   const [disputeModalMarket, setDisputeModalMarket] = useState<PolymarketMarket | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
   const [resolvedMarketsData, setResolvedMarketsData] = useState<Record<string, {
@@ -65,7 +67,12 @@ export function MarketGroupDetail() {
     reasoning: string
     disputeDeadline: string
   }>>({})
-  const [userStakesByMarket, setUserStakesByMarket] = useState<Record<string, any[]>>({})
+  const [userStakesByMarket, setUserStakesByMarket] = useState<Record<string, Stake[]>>({})
+  const [userDisputesByMarket, setUserDisputesByMarket] = useState<Record<string, {
+    isValid: boolean
+    reviewed: boolean
+    judgmentReasoning: string
+  }>>({})
 
   useEffect(() => {
     let cancelled = false
@@ -147,7 +154,6 @@ export function MarketGroupDetail() {
     async function checkContractStates() {
       try {
         const CONTRACT_ADDRESS = import.meta.env.VITE_GENLAYER_CONTRACT || ''
-        console.log('[MarketGroupDetail] Checking contract states, address:', CONTRACT_ADDRESS)
         if (!CONTRACT_ADDRESS) return
 
         const { createGenLayerClient } = await import('../lib/genlayer/client')
@@ -156,9 +162,10 @@ export function MarketGroupDetail() {
         const resolvedIds = new Set<string>()
         const resolutionDataMap: Record<string, { outcomeIndex: number; reasoning: string; disputeDeadline: string }> = {}
 
+        const freshPools: Record<string, PoolEntry[]> = {}
+
         for (const market of groupMarkets) {
           try {
-            console.log('[MarketGroupDetail] Checking market:', market.id)
             const raw = await client.readContract({
               address: CONTRACT_ADDRESS,
               functionName: 'get_market',
@@ -166,11 +173,9 @@ export function MarketGroupDetail() {
             })
 
             const jsonStr = typeof raw === 'string' ? raw : String(raw ?? 'null')
-            console.log('[MarketGroupDetail] Market', market.id, 'raw:', jsonStr.slice(0, 200))
             if (jsonStr === 'null' || !jsonStr) continue
 
             const parsed = JSON.parse(jsonStr) as Record<string, unknown>
-            console.log('[MarketGroupDetail] Market', market.id, 'is_resolved:', parsed.is_resolved)
             if (parsed.is_resolved === true) {
               resolvedIds.add(market.id)
               resolutionDataMap[market.id] = {
@@ -178,16 +183,33 @@ export function MarketGroupDetail() {
                 reasoning: String(parsed.resolution_reasoning || ''),
                 disputeDeadline: String(parsed.dispute_deadline || ''),
               }
-              console.log('[MarketGroupDetail] Market', market.id, 'IS resolved')
+              // Sync pools from contract for resolved markets (UI shows stale Supabase data)
+              try {
+                const poolsRaw = await client.readContract({
+                  address: CONTRACT_ADDRESS,
+                  functionName: 'get_all_pools',
+                  args: [market.id],
+                })
+                const poolsStr = typeof poolsRaw === 'string' ? poolsRaw : String(poolsRaw ?? '[]')
+                const poolArr = JSON.parse(poolsStr) as { outcome_index: number; amount: number }[]
+                freshPools[market.id] = poolArr.map((p) => ({
+                  outcomeIndex: p.outcome_index,
+                  amount: p.amount,
+                }))
+              } catch {
+                // keep existing pool data
+              }
             }
-          } catch (err) {
-            console.log('[MarketGroupDetail] Market check failed:', market.id, err)
+          } catch {
           }
         }
 
-        console.log('[MarketGroupDetail] Resolved IDs:', resolvedIds)
         if (!cancelled && resolvedIds.size > 0) {
           setResolvedMarketsData(resolutionDataMap)
+          // Sync pools from contract for resolved markets (UI was showing stale Supabase data)
+          if (Object.keys(freshPools).length > 0) {
+            setPoolsByMarketId((prev) => ({ ...prev, ...freshPools }))
+          }
           // Update market statuses
           setGroupMarkets((prev) =>
             prev.map((m) =>
@@ -195,8 +217,7 @@ export function MarketGroupDetail() {
             )
           )
         }
-      } catch (err) {
-        console.error('[MarketGroupDetail] Contract state check failed:', err)
+      } catch {
       }
     }
 
@@ -215,24 +236,52 @@ export function MarketGroupDetail() {
       const stakesMap: Record<string, any[]> = {}
       for (const marketId of marketIds) {
         try {
-          console.log('[MarketGroupDetail] Fetching contract stakes for', marketId, 'user:', userAddr)
           const stakes = await getContractUserStakes(marketId, userAddr)
-          console.log('[MarketGroupDetail] Contract stakes for', marketId, ':', stakes)
           stakesMap[marketId] = stakes.map((s) => ({
             outcomeIndex: s.outcomeIndex,
             amount: s.amount,
+            claimed: s.claimed,
           }))
-        } catch (err) {
-          console.log('[MarketGroupDetail] Failed to fetch contract stakes for', marketId, err)
+        } catch {
           stakesMap[marketId] = []
         }
       }
       if (!cancelled) {
-        console.log('[MarketGroupDetail] Setting stakesMap:', stakesMap)
         setUserStakesByMarket(stakesMap)
       }
     }
     fetchStakes()
+    return () => { cancelled = true }
+  }, [resolvedMarketsData, isConnected, address])
+
+  // Fetch user dispute records for resolved markets
+  useEffect(() => {
+    const marketIds = Object.keys(resolvedMarketsData)
+    if (!isConnected || !address || marketIds.length === 0) return
+    const userAddr = address
+    let cancelled = false
+
+    async function fetchDisputes() {
+      const disputesMap: Record<string, { isValid: boolean; reviewed: boolean; judgmentReasoning: string }> = {}
+      for (const marketId of marketIds) {
+        try {
+          const dispute = await getContractDispute(marketId, userAddr)
+          if (dispute && dispute.reviewed) {
+            disputesMap[marketId] = {
+              isValid: dispute.isValid,
+              reviewed: dispute.reviewed,
+              judgmentReasoning: dispute.judgmentReasoning || '',
+            }
+          }
+        } catch {
+          // no dispute record
+        }
+      }
+      if (!cancelled) {
+        setUserDisputesByMarket(disputesMap)
+      }
+    }
+    fetchDisputes()
     return () => { cancelled = true }
   }, [resolvedMarketsData, isConnected, address])
 
@@ -289,6 +338,21 @@ export function MarketGroupDetail() {
   const handleDisputeMarket = useCallback((market: PolymarketMarket) => {
     setDisputeModalMarket(market)
   }, [])
+
+  const handleClaimMarket = useCallback(async (market: PolymarketMarket) => {
+    if (!address) return
+    setClaimingId(market.id)
+    try {
+      await claimWinnings(address, market.id)
+      showToast('Winnings claimed!', 'success')
+      setClaimedLocally((prev) => new Set([...prev, market.id]))
+      setRefreshKey((k) => k + 1)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Claim failed', 'error')
+    } finally {
+      setClaimingId(null)
+    }
+  }, [address, claimWinnings, showToast])
 
   if (loading) {
     return (
@@ -448,17 +512,50 @@ export function MarketGroupDetail() {
                           const disputeDeadline = resData.disputeDeadline ? new Date(resData.disputeDeadline) : null
                           const disputeWindowOpen = disputeDeadline ? new Date() < disputeDeadline : false
                           const userStakes = userStakesByMarket[market.id] || []
-                          const stakedOnWinner = userStakes.some((s: any) => s.outcomeIndex === resData.outcomeIndex)
+                          const stakedOnWinner = userStakes.some((s) => s.outcomeIndex === resData.outcomeIndex)
                           const hasAnyStake = userStakes.length > 0
+                          const userDispute = userDisputesByMarket[market.id]
+                          const stakeClaimed = claimedLocally.has(market.id) || userStakes.some((s) => s.outcomeIndex === resData.outcomeIndex && s.claimed)
 
-                          console.log('[MarketGroupDetail] UI render:', {
-                            marketId: market.id,
-                            disputeWindowOpen,
-                            hasAnyStake,
-                            userStakes,
-                            stakedOnWinner,
-                            winnerIndex: resData.outcomeIndex,
-                          })
+                          if (userDispute && userDispute.reviewed) {
+                            return (
+                              <div className={`dispute-result-banner ${userDispute.isValid ? 'dispute-accepted' : 'dispute-rejected'}`}>
+                                <div className="dispute-result-header">
+                                  <span className="dispute-result-icon">{userDispute.isValid ? '✓' : '✗'}</span>
+                                  <strong>
+                                    {userDispute.isValid
+                                      ? 'Your dispute was accepted! Outcome updated.'
+                                      : 'Your dispute was reviewed. Original outcome stands.'}
+                                  </strong>
+                                </div>
+                                {userDispute.judgmentReasoning && (
+                                  <div className="dispute-result-reasoning">
+                                    <h4>AI Judgment</h4>
+                                    <p>{userDispute.judgmentReasoning}</p>
+                                  </div>
+                                )}
+                                {hasAnyStake && (
+                                  <div className={`user-result-badge ${stakedOnWinner ? 'win' : 'lose'}`} style={{ marginTop: '12px' }}>
+                                    <span className="result-icon">{stakedOnWinner ? '✓' : '✗'}</span>
+                                    <span>
+                                      {stakedOnWinner
+                                        ? (stakeClaimed ? 'Rewards claimed!' : 'You Won!')
+                                        : `You Lost. Winner: ${market.outcomes[resData.outcomeIndex]}`}
+                                    </span>
+                                    {stakedOnWinner && !stakeClaimed && (
+                                      <button
+                                        className="btn-claim-group"
+                                        onClick={() => handleClaimMarket(market)}
+                                        disabled={claimingId === market.id}
+                                      >
+                                        {claimingId === market.id ? 'Claiming...' : 'Claim Rewards'}
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          }
 
                           if (disputeWindowOpen) {
                             if (hasAnyStake) {
@@ -499,7 +596,16 @@ export function MarketGroupDetail() {
                                 return (
                                   <div className="user-result-badge win">
                                     <span className="result-icon">✓</span>
-                                    <span>You Won!</span>
+                                    <span>{stakeClaimed ? 'Rewards claimed!' : 'You Won!'}</span>
+                                    {!stakeClaimed && (
+                                      <button
+                                        className="btn-claim-group"
+                                        onClick={() => handleClaimMarket(market)}
+                                        disabled={claimingId === market.id}
+                                      >
+                                        {claimingId === market.id ? 'Claiming...' : 'Claim Rewards'}
+                                      </button>
+                                    )}
                                   </div>
                                 )
                               } else {

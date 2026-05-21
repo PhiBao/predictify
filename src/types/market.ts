@@ -60,6 +60,7 @@ export interface Dispute {
   reviewed: boolean
   timestamp: string
   txHash: string
+  judgmentReasoning?: string
 }
 
 export interface Stake {

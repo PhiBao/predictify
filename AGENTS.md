@@ -5,7 +5,7 @@
 This is a React 19 + TypeScript + Vite prediction market DApp with:
 1. **Polymarket data** — markets fetched from Polymarket Gamma API
 2. **Supabase indexing** — all market data cached and indexed in Supabase
-3. **GenLayer AI** — handles market analysis, outcome resolution, and dispute review
+3. **GenLayer AI** — handles market resolution and dispute review via staking-based predict market contract
 4. **Apple-inspired design system** with glass navigation and cinematic sections
 5. **Unified wallet** — MetaMask for GenLayer interactions
 
@@ -26,28 +26,29 @@ src/
     MarketCard.tsx        # Market card with outcome probabilities
     GroupedMarketCard.tsx # Grouped card with internal scroll for rows
     MarketsList.tsx       # Market grid with filter tabs (Live/Trending/Closing Soon/Resolved/All)
-    MarketDetail.tsx      # Detail page with outcomes, GenLayer analysis + resolution
+    MarketDetail.tsx      # Detail page with outcomes, GenLayer resolution + dispute
     MarketGroupDetail.tsx # Unified group detail page with all markets
     ResolutionModal.tsx   # Request market resolution via GenLayer
     DisputeModal.tsx      # Challenge a resolution with evidence
-    AnalyzeModal.tsx      # Standalone AI analysis modal
+    StakeModal.tsx        # Stake GEN tokens on outcomes
     WalletConnect.tsx     # RainbowKit wallet button
     Toast.tsx             # Notification system
     MarketSkeleton.tsx    # Shimmer loading skeletons
     ScrollToTop.tsx       # Floating scroll-to-top
+    PortfolioPage.tsx     # User portfolio with stakes + claimable winnings
   contexts/
     ToastContext.tsx      # Global toast notifications
   hooks/
-    useGenLayer.ts        # GenLayer state management (analysis, resolution, disputes)
-    useNetworkState.ts    # Network detection + switching
+    useGenLayer.ts        # GenLayer state management (stake, resolve, dispute, claim)
+    useNetworkState.ts    # Network detection + switching (GenLayer Studio)
   lib/genlayer/
     client.ts             # GenLayer client + MetaMask network helpers
   services/
     polymarketAPI.ts      # Polymarket Gamma API client
     supabase.ts           # Supabase client for market indexing
-    genlayer.ts           # GenLayer contract service (analysis + resolution + disputes)
+    genlayer.ts           # GenLayer contract service (stake + resolve + dispute + claim)
   types/
-    market.ts             # TypeScript definitions for markets, analysis, resolution, disputes
+    market.ts             # TypeScript definitions for markets, stakes, resolutions, disputes
     predict.ts            # Re-exports from market.ts for backwards compatibility
   config/
     wagmi.ts              # Wagmi + RainbowKit config
@@ -58,17 +59,18 @@ src/
 
 contracts/
   MarketResolver.py     # GenLayer Intelligent Contract (deploy to Studio)
+
+demo/
+  demo.sh               # Automated demo script (<  2 min)
 ```
 
-## Key Technical Details
-
-### Data Flow
+## Data Flow
 
 ```
 Polymarket Gamma API → Supabase (cache/index) → Frontend
                                                     ↓
-                                              GenLayer Contract
-                                          (Analysis/Resolution/Disputes)
+                                          GenLayer PredictMarket Contract
+                                        (Stake → Resolve → Dispute → Claim)
 ```
 
 ### Polymarket Integration
@@ -78,9 +80,9 @@ Polymarket Gamma API → Supabase (cache/index) → Frontend
 - No trading — markets are informational with GenLayer-powered resolution
 
 ### Supabase Integration
-- Tables: `markets`, `analyses`, `resolutions`, `disputes`, `sync_metadata`
+- Tables: `markets`, `analyses`, `resolutions`, `disputes`, `sync_metadata`, `stakes`, `market_pools`
 - Markets are upserted on fetch for caching
-- Analysis and resolution results are stored after GenLayer transactions
+- Stake and pool data cached after GenLayer transactions
 - Provides fallback when Polymarket API is unavailable
 
 **Required Supabase schema:**
@@ -110,6 +112,24 @@ CREATE TABLE markets (
   last_synced TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE market_pools (
+  id SERIAL PRIMARY KEY,
+  market_id TEXT NOT NULL,
+  outcome_index INT NOT NULL,
+  amount FLOAT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(market_id, outcome_index)
+);
+
+CREATE TABLE stakes (
+  id SERIAL PRIMARY KEY,
+  market_id TEXT NOT NULL,
+  user TEXT NOT NULL,
+  outcome_index INT NOT NULL DEFAULT 0,
+  amount FLOAT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE analyses (
@@ -165,74 +185,59 @@ CREATE TABLE sync_metadata (
 
 **One contract handles everything:** `contracts/MarketResolver.py`
 
-**Three core functions:**
-1. `analyze_market()` — AI opinion on market sentiment, risk, key factors
-2. `resolve_market()` — AI determines the actual outcome based on evidence
-3. `dispute_resolution()` — Challenge a resolution; AI reviews and makes final judgment
+**Five core functions:**
+1. `stake()` — Stake GEN tokens on a market outcome (auto-registers market)
+2. `register_market()` — Pre-register a market without staking
+3. `resolve_market()` — AI determines the actual outcome based on evidence
+4. `dispute_resolution()` — Challenge a resolution; AI reviews and makes final judgment
+5. `claim_winnings()` — Claim winnings after dispute period expires
+
+**Storage keys (critical):**
+```python
+_stake_key(market_id, user, outcome_index) = f"{market_id}:{user.as_hex}:{int(outcome_index)}"
+_pool_key(market_id, outcome_index) = f"{market_id}:{int(outcome_index)}"
+```
+Output: Always write back mutated Market objects: `self.markets[market_id] = market`
 
 **Network:** GenLayer Studio (Chain ID 61999)
 **Payment:** native GEN tokens via `value: BigInt(amountWei)`
 
-### GenLayer Contract Pattern (v0.1.x — Studio Compatible)
+### GenLayer Contract State
 
 ```python
-from dataclasses import dataclass
-from genlayer import *
+@allow_storage
+@dataclass
+class Market:
+    market_id, question, outcomes, outcome_count, end_date
+    is_active, is_resolved, resolved_outcome_index, total_pool
+    resolution_reasoning, resolved_at, dispute_deadline
 
 @allow_storage
 @dataclass
-class AnalysisResult:
-    sentiment: str
-    confidence: u32
-    summary: str
-    key_factors_json: str
-    risk_level: str
-    recommended_action: str
-    timestamp: str
-    analyst: Address
-
-@allow_storage
-@dataclass
-class ResolutionResult:
-    market_id: str
-    resolved_outcome: str
-    outcome_index: u32
-    confidence: u32
-    reasoning: str
-    evidence_json: str
-    timestamp: str
-    resolver: Address
-    is_finalized: bool
-    dispute_count: u32
+class Stake:
+    user, outcome_index, amount, claimed
 
 @allow_storage
 @dataclass
 class DisputeRecord:
-    market_id: str
-    resolution_id: u256
-    challenger: Address
-    proposed_outcome: str
-    proposed_outcome_index: u32
-    evidence: str
-    reasoning: str
-    timestamp: str
-    is_valid: bool
-    reviewed: bool
-
-class MarketResolver(gl.Contract):
-    analyses: TreeMap[u256, AnalysisResult]
-    analysis_count: u256
-    resolutions: TreeMap[u256, ResolutionResult]
-    resolution_count: u256
-    disputes: TreeMap[u256, DisputeRecord]
-    dispute_count: u256
-    market_resolutions: TreeMap[str, u256]
-    min_analysis_fee: u256
-    min_resolution_fee: u256
-    min_dispute_fee: u256
-    owner: Address
-    # ... see contracts/MarketResolver.py for full implementation
+    market_id, challenger, proposed_outcome_index
+    evidence_urls, reasoning, is_valid, reviewed
+    fee_held, judgment_reasoning
 ```
+
+### View Functions (all return JSON strings via json.dumps)
+
+| Function | Args | Returns |
+|----------|------|---------|
+| `get_market` | `(market_id)` | `Market` JSON or null |
+| `get_all_pools` | `(market_id)` | `[{outcome_index, amount}]` |
+| `get_stake` | `(market_id, user_hex, outcome_index)` | `{exists, amount, claimed}` |
+| `get_user_stakes` | `(market_id, user_hex)` | `[{market_id, user, outcome_index, amount, claimed}]` |
+| `get_dispute` | `(market_id, challenger_hex)` | `DisputeRecord` JSON or null |
+| `get_dispute_count` | `()` | `u256` |
+| `get_contract_balance` | `()` | `u256` |
+| `get_min_stake` | `()` | `u256` |
+| `get_min_dispute_fee` | `()` | `u256` |
 
 ### Frontend Patterns
 
@@ -240,7 +245,7 @@ class MarketResolver(gl.Contract):
 ```typescript
 const receipt = await client.waitForTransactionReceipt({
   hash: txHash,
-  status: TransactionStatus.FINALIZED,
+  status: 'FINALIZED',
   interval: 3000,
   retries: 200,
 });
@@ -257,20 +262,29 @@ function parseU256(raw: unknown): number {
 }
 ```
 
+**Reading JSON-string view returns:**
+```typescript
+const jsonStr = typeof raw === 'string' ? raw : String(raw ?? 'null');
+const parsed = JSON.parse(jsonStr);
+```
+
 ### Design System
 - Apple Design System colors, typography, spacing
 - CSS custom properties in `index.css`
 - Component styles in `App.css`
 - No external UI library — pure custom CSS
 
+## Known Bugs (Fixed)
+
+1. **Missing `self.markets[market_id] = market` write-back**: TreeMap.get returns a copy of stored objects. Mutations to fields (e.g. `market.total_pool += amount`) are lost unless explicitly written back. Fixed in `stake()`, `resolve_market()`, `dispute_resolution()`.
+
 ## Code Quality Standards
 
 1. **TypeScript Strict:** Minimize `any`, prefer explicit interfaces
 2. **Error Handling:** All async operations wrapped in try/catch
 3. **Effect Cleanup:** Use cancellation flags for async effects
-4. **Accessibility:** ARIA labels, focus states, semantic HTML
-5. **Performance:** Lazy loading images, memoized callbacks
-6. **Security:** No secrets in code, input validation, sanitized outputs
+4. **Performance:** Keep console.log out of production builds
+5. **Security:** No secrets in code, input validation, sanitized outputs
 
 ## Environment Variables
 
@@ -280,7 +294,7 @@ function parseU256(raw: unknown): number {
 | VITE_SUPABASE_URL | Yes | Supabase project URL |
 | VITE_SUPABASE_ANON_KEY | Yes | Supabase anon key |
 | VITE_GENLAYER_RPC | No | GenLayer RPC endpoint (default: https://studio.genlayer.com/api) |
-| VITE_GENLAYER_CONTRACT | Yes | Deployed MarketResolver address |
+| VITE_GENLAYER_CONTRACT | Yes | Deployed PredictMarket address |
 
 ## Deploying the GenLayer Contract
 
@@ -323,15 +337,18 @@ function parseU256(raw: unknown): number {
 - Ensure MetaMask is connected to GenLayer Studio network (Chain ID 61999)
 - Check GEN balance (get from Studio faucet)
 - Verify contract address is set in `.env`
-- Check browser console for specific error
 
 **Markets not loading:**
 - Check Supabase connection (URL and anon key in `.env`)
 - Polymarket API may be rate-limited; Supabase cache provides fallback
+
+**Stakes show wrong pool distribution:**
+- The deployed contract may need redeployment with Market object write-back fix
 
 ## External Resources
 
 - [Polymarket API Docs](https://polymarket.com/)
 - [GenLayer Full Docs](https://docs.genlayer.com/full-documentation.txt)
 - [GenLayer JS SDK API](https://sdk.genlayer.com/main/_static/ai/api.txt)
+- [GenLayer Studio](https://studio.genlayer.com)
 - [Supabase Docs](https://supabase.com/docs)
