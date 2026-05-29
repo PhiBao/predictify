@@ -6,7 +6,7 @@ import { getMarketById as getSupabaseMarket, getResolutionByMarketId } from '../
 import { useGenLayer } from '../hooks/useGenLayer'
 import { useToast } from '../contexts/ToastContext'
 import { useNetworkState } from '../hooks/useNetworkState'
-import type { PolymarketMarket } from '../types/market'
+import type { PolymarketMarket, Stake } from '../types/market'
 import { formatVolume, formatGen } from '../types/market'
 import { ResolutionModal } from './ResolutionModal'
 import { DisputeModal } from './DisputeModal'
@@ -63,7 +63,7 @@ export function MarketDetail() {
     resolvedAt: string
     disputeDeadline: string
   } | null>(null)
-  const [contractUserStakes, setContractUserStakes] = useState<any[]>([])
+  const [contractUserStakes, setContractUserStakes] = useState<Stake[]>([])
   const [refreshKey, setRefreshKey] = useState(0)
 
   useEffect(() => {
@@ -112,7 +112,7 @@ export function MarketDetail() {
           // Fetch user stakes from contract using get_stake
           if (isConnected && address) {
             const outcomeCount = Number(parsed.outcome_count ?? 2)
-            const userStakes: any[] = []
+            const userStakes: Stake[] = []
             for (let i = 0; i < outcomeCount; i++) {
               try {
                 const stakeRaw = await client.readContract({
@@ -125,6 +125,8 @@ export function MarketDetail() {
                   const stakeParsed = JSON.parse(stakeJson) as Record<string, unknown>
                   if (stakeParsed.exists === true) {
                     userStakes.push({
+                      marketId,
+                      user: address,
                       outcomeIndex: i,
                       amount: Number(stakeParsed.amount ?? 0),
                       claimed: Boolean(stakeParsed.claimed),
@@ -132,6 +134,7 @@ export function MarketDetail() {
                   }
                 }
               } catch {
+                // stake not found for this outcome
               }
             }
             if (!cancelled) {
@@ -140,6 +143,7 @@ export function MarketDetail() {
           }
         }
       } catch {
+        // contract not reachable or market not deployed
       }
     }
 

@@ -27,11 +27,11 @@ async function pollTransaction(
     onProgress?.('proposing')
 
     const receipt = await client.waitForTransactionReceipt({
-      hash: txHash as any,
-      status: 'FINALIZED' as any,
+      hash: txHash as `0x${string}`,
+      status: 'FINALIZED',
       interval: 3000,
       retries: 200,
-    })
+    } as Parameters<typeof client.waitForTransactionReceipt>[0])
 
     const isFinalized = receipt.status === 'FINALIZED' || receipt.status === 7
     if (isFinalized) {
@@ -39,7 +39,7 @@ async function pollTransaction(
       return true
     }
     return false
-  } catch (err) {
+  } catch {
     for (let i = 0; i < 100; i++) {
       await new Promise((resolve) => setTimeout(resolve, 3000))
       try {
@@ -63,6 +63,7 @@ async function pollTransaction(
           return false
         }
       } catch {
+        // individual poll attempt failed, will retry
       }
       if (i < 10) onProgress?.('proposing')
       else if (i < 50) onProgress?.('verifying')

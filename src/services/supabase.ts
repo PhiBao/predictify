@@ -41,7 +41,7 @@ export async function getExpiredMarkets(limit = 500): Promise<SupabaseMarketRow[
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      let query = supabase
+      const query = supabase
         .from('markets')
         .select('*')
         .lt('end_date', now)
@@ -71,7 +71,7 @@ export async function getClosingSoonMarkets(limit = 100): Promise<SupabaseMarket
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      let query = supabase
+      const query = supabase
         .from('markets')
         .select('*')
         .eq('status', 'active')

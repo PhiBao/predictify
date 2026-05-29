@@ -27,7 +27,7 @@ interface EthereumProvider {
 
 function getProvider(): EthereumProvider | null {
   if (typeof window === 'undefined') return null
-  return (window as any).ethereum || null
+  return (window as unknown as { ethereum?: EthereumProvider }).ethereum || null
 }
 
 export async function getCurrentChainId(): Promise<number | null> {

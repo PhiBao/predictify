@@ -201,6 +201,7 @@ export function MarketGroupDetail() {
               }
             }
           } catch {
+            // market not found on contract
           }
         }
 
@@ -218,6 +219,7 @@ export function MarketGroupDetail() {
           )
         }
       } catch {
+        // contract state check failed — will retry on next render
       }
     }
 
@@ -233,11 +235,13 @@ export function MarketGroupDetail() {
     let cancelled = false
 
     async function fetchStakes() {
-      const stakesMap: Record<string, any[]> = {}
+      const stakesMap: Record<string, Stake[]> = {}
       for (const marketId of marketIds) {
         try {
           const stakes = await getContractUserStakes(marketId, userAddr)
           stakesMap[marketId] = stakes.map((s) => ({
+            marketId: s.marketId,
+            user: s.user,
             outcomeIndex: s.outcomeIndex,
             amount: s.amount,
             claimed: s.claimed,
