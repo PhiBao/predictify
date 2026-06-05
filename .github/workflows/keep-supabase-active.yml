@@ -7,17 +7,21 @@ on:
   workflow_dispatch:
 
 jobs:
-  ping:
+  sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Supabase to prevent auto-pause
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sync markets from Polymarket to Supabase
         env:
           SUPABASE_URL: ${{ vars.SUPABASE_URL || secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-        run: |
-          echo "Pinging Supabase at $(date -u)"
-          curl -s -o /dev/null -w "HTTP %{http_code}" \
-            -H "apikey: ${SUPABASE_ANON_KEY}" \
-            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
-            "${SUPABASE_URL}/rest/v1/sync_metadata?select=id&limit=1" \
-            || echo "Ping failed (Supabase may be paused or unreachable)"
+        run: node scripts/sync-markets.mjs
